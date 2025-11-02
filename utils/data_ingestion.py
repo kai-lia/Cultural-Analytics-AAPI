@@ -112,10 +112,10 @@ def get_dolma_dataset(
     )
     if source_filter:
         log.info(f"Filtering stream: source == {source_filter!r}")
-        c4_stream = (
+        ds = (
             ex
             for ex in ds
-            if isinstance(ex, dict) and ex.get("source") == "source_filter"
+            if isinstance(ex, dict) and ex.get("source") == source_filter
         )
 
     for batch, curr_index in tqdm.tqdm(
