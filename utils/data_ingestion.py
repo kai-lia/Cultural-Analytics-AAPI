@@ -91,7 +91,11 @@ def process_batches(dataset: Iterable, batch_size: int, start_index: int = 0):
     batch = []
     current_index = start_index
 
-    for example in stream:
+    for example in tqdm.tqdm(
+        stream,
+        desc="Process batches",
+        unit="batch",
+    ):
         batch.append(example)
         if len(batch) == batch_size:
             yield batch, current_index
@@ -180,10 +184,8 @@ def get_dolma_dataset(
                 if isinstance(ex, dict) and ex.get("source") == source_filter
             )
 
-    for batch, curr_index in tqdm.tqdm(
-        process_batches(ds, batch_size=batch_size, start_index=start_index),
-        desc="Dolma batches",
-        unit="batch",
+    for batch, curr_index in process_batches(
+        ds, batch_size=batch_size, start_index=start_index
     ):
         # Save the checkpoint for the active filter key
         save_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE, ck_key, curr_index)
