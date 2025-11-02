@@ -6,17 +6,10 @@ from datasets import load_dataset
 
 from warcio.archiveiterator import ArchiveIterator
 from typing import (
-    Any,
-    Dict,
     Iterable,
-    Iterator,
-    List,
-    Tuple,
-    Generator,
-    cast,
-    TypedDict,
 )
-
+import itertools
+import os
 
 INGEST_BATCH_SIZE = 1000
 
@@ -30,21 +23,70 @@ logging.basicConfig(
 log = logging.getLogger("cultural.analytics.util")
 
 
-def load_checkpoint(checpoint_file: str):
+def _checkpoint_key(source_filter: str | None) -> str:
+    return f"ALL" if not source_filter else f"source={source_filter}"
+
+
+def load_checkpoint(checpoint_file: str, key: str) -> int:
+    """
+    Backward compatible:
+    - If file contains {"offset": N}, use it only for key=="ALL"; others default to 0.
+    - If file contains {"keys": {"ALL": N, "source=foo": M}}, use the matching key.
+    """
     try:
         with open(checpoint_file, "r") as f:
-            return json.load(f)["offset"]
+            data = json.load(f)
+        if isinstance(data, dict) and "keys" in data and isinstance(data["keys"], dict):
+            return int(data["keys"].get(key, 0))
+        # legacy single-offset format
+        if key == "ALL" and "offset" in data:
+            return int(data["offset"])
+        return 0
     except FileNotFoundError:
         return 0
 
 
-def save_checkpoint(checpoint_file: str, offset: int):
+def save_checkpoint(checpoint_file: str, key: str, offset: int) -> None:
+    # Load existing (if any), migrate legacy format to multi-key
+    payload = {"keys": {}}
+    if os.path.exists(checpoint_file):
+        try:
+            with open(checpoint_file, "r") as f:
+                data = json.load(f)
+            if (
+                isinstance(data, dict)
+                and "keys" in data
+                and isinstance(data["keys"], dict)
+            ):
+                payload = {"keys": data["keys"]}
+            elif "offset" in data:
+                # migrate legacy ALL offset
+                payload = {"keys": {"ALL": int(data["offset"])}}
+        except Exception:
+            # If unreadable/corrupt, start fresh
+            payload = {"keys": {}}
+
+    payload["keys"][key] = int(offset)
     with open(checpoint_file, "w") as f:
-        json.dump({"offset": offset}, f)
+        json.dump(payload, f)
 
 
-def process_batches(dataset, batch_size, start_index=0):
-    stream = dataset.skip(start_index)
+def _skip_iterable(iterable: Iterable, n: int) -> Iterable:
+    """Safe skip for any iterable/generator."""
+    if n <= 0:
+        return iterable
+    return itertools.islice(iterable, n, None)
+
+
+def process_batches(dataset: Iterable, batch_size: int, start_index: int = 0):
+    """
+    Works with either a Hugging Face streaming IterableDataset (has .skip)
+    or any generic Iterable/generator.
+    """
+    if hasattr(dataset, "skip"):
+        stream = dataset.skip(start_index)  # preserves HF streaming efficiency
+    else:
+        stream = _skip_iterable(dataset, start_index)
 
     batch = []
     current_index = start_index
@@ -97,31 +139,52 @@ def get_dolma_dataset(
     journal={arXiv preprint},
     }
     """
+    ck_key = _checkpoint_key(source_filter)
     start_index = (
-        load_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE)
+        load_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE, ck_key)
         if is_use_last_checkpoint
         else 0
     )
+
     if start_index:
-        log.info(f"Resuming Dolma stream from offset {start_index:,}")
+        log.info(f"Resuming Dolma stream from offset {start_index:,} (key={ck_key})")
     else:
-        log.info("Starting Dolma stream from offset 0")
+        log.info(f"Starting Dolma stream from offset 0 (key={ck_key})")
 
     ds = load_dataset(
         "allenai/dolma", "v1_7", streaming=True, split="train", trust_remote_code=True
     )
+
     if source_filter:
         log.info(f"Filtering stream: source == {source_filter!r}")
-        ds = (
-            ex
-            for ex in ds
-            if isinstance(ex, dict) and ex.get("source") == source_filter
-        )
+        # Prefer HF's built-in filter to preserve streaming ops like .skip()
+        if hasattr(ds, "filter"):
+            try:
+                ds = ds.filter(
+                    lambda ex: isinstance(ex, dict)
+                    and ex.get("source") == source_filter
+                )
+            except Exception as e:
+                log.warning(
+                    f"HF filter failed ({e!r}); falling back to generator filter."
+                )
+                ds = (
+                    ex
+                    for ex in ds
+                    if isinstance(ex, dict) and ex.get("source") == source_filter
+                )
+        else:
+            ds = (
+                ex
+                for ex in ds
+                if isinstance(ex, dict) and ex.get("source") == source_filter
+            )
 
     for batch, curr_index in tqdm.tqdm(
         process_batches(ds, batch_size=batch_size, start_index=start_index),
         desc="Dolma batches",
         unit="batch",
     ):
-        save_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE, curr_index)
+        # Save the checkpoint for the active filter key
+        save_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE, ck_key, curr_index)
         yield batch
