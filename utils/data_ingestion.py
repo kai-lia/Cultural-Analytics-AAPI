@@ -1,16 +1,33 @@
-import io
-import gzip
 import json
-import requests
+import tqdm
+import logging
 import pandas as pd
 from datasets import load_dataset
 
 from warcio.archiveiterator import ArchiveIterator
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Tuple,
+    Generator,
+    cast,
+    TypedDict,
+)
+
 
 INGEST_BATCH_SIZE = 1000
 
 ETHNIC_GROUP_LIST_FILE = "data/DECENNIALDDHCB2020.T03004-Data.csv"
 DOLMA_INGESTION_CHECKPOINT_FILE = "dolma_checkpoint.json"
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+log = logging.getLogger("cultural.analytics.util")
 
 
 def load_checkpoint(checpoint_file: str):
@@ -60,7 +77,9 @@ def get_ethnic_group_list() -> set[str]:
 
 
 def get_dolma_dataset(
-    batch_size: int = INGEST_BATCH_SIZE, is_use_last_checkpoint: bool = True
+    batch_size: int = INGEST_BATCH_SIZE,
+    is_use_last_checkpoint: bool = True,
+    source_filter: str | None = None,
 ):
     """
     @article{dolma,
@@ -78,14 +97,31 @@ def get_dolma_dataset(
     journal={arXiv preprint},
     }
     """
-    start_index = 0
-    if is_use_last_checkpoint:
-        start_index = load_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE)
+    start_index = (
+        load_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE)
+        if is_use_last_checkpoint
+        else 0
+    )
+    if start_index:
+        log.info(f"Resuming Dolma stream from offset {start_index:,}")
+    else:
+        log.info("Starting Dolma stream from offset 0")
 
     ds = load_dataset(
         "allenai/dolma", "v1_7", streaming=True, split="train", trust_remote_code=True
     )
+    if source_filter:
+        log.info(f"Filtering stream: source == {source_filter!r}")
+        ds = (
+            ex
+            for ex in ds
+            if isinstance(ex, dict) and ex.get("source") == source_filter
+        )
 
-    for batch, curr_index in process_batches(ds, batch_size, start_index):
+    for batch, curr_index in tqdm.tqdm(
+        process_batches(ds, batch_size=batch_size, start_index=start_index),
+        desc="Dolma batches",
+        unit="batch",
+    ):
         save_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE, curr_index)
         yield batch
