@@ -193,7 +193,7 @@ def test_get_dolma_dataset_resumes_from_checkpoint(monkeypatch):
 
     saved = []
     monkeypatch.setattr(
-        "utils.data_ingestion.save_checkpoint", lambda p, o: saved.append(o)
+        "utils.data_ingestion.save_checkpoint", lambda p, k, o: saved.append(o)
     )
 
     batches = list(get_dolma_dataset(batch_size=4, is_use_last_checkpoint=True))
