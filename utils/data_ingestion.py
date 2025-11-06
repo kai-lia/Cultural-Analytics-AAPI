@@ -126,6 +126,7 @@ def get_dolma_dataset(
     batch_size: int = INGEST_BATCH_SIZE,
     is_use_last_checkpoint: bool = True,
     source_filter: str | None = None,
+    num_batch: float = float("inf"),
 ):
     """
     @article{dolma,
@@ -183,10 +184,14 @@ def get_dolma_dataset(
                 for ex in ds
                 if isinstance(ex, dict) and ex.get("source") == source_filter
             )
-
+    curr_batch = 0
     for batch, curr_index in process_batches(
         ds, batch_size=batch_size, start_index=start_index
     ):
         # Save the checkpoint for the active filter key
         save_checkpoint(DOLMA_INGESTION_CHECKPOINT_FILE, ck_key, curr_index)
         yield batch
+
+        curr_batch += 1
+        if curr_batch >= num_batch:
+            return
