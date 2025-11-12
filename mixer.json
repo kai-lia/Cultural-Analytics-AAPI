@@ -1,0 +1,23 @@
+{
+  "streams": [
+    {
+      "name": "non-aapi-keywords",
+      "documents": [
+        "/Users/kaionamartinson/Desktop/Cultural-Analytics/Cultural-Analytics-AAPI/data/c4/v0/c4-train.00000.jsonl.gz"
+      ],
+      "output": {
+        "path": "/Users/kaionamartinson/Desktop/Cultural-Analytics/Cultural-Analytics-AAPI/test/filtered/tokener.gz ",
+        "max_size_in_bytes": 1000000000
+      },
+      "attributes": [
+        "aapi_keywords_v1"
+      ],
+      "filter": {
+       "include": [
+          "$.attributes[?(@.aapi_keywords_v1__aapi_keywords_v1__aapi_keyword)]"
+        ]
+      }
+    }
+  ],
+  "processes": 1
+}
