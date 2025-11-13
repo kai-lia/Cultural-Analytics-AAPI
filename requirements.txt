@@ -3,6 +3,7 @@ requests
 warcio
 ipykernel
 pytest
+dolma
 
 # Hugging Face + streaming stack
 datasets==2.19.1
