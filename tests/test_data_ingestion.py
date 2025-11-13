@@ -4,7 +4,7 @@ import pytest
 import pandas as pd
 
 # Import your functions under test
-from utils.data_ingestion import (
+from utils.fetchers.data_ingestion import (
     load_checkpoint,
     save_checkpoint,
     process_batches,
