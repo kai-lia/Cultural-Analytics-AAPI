@@ -2,5 +2,6 @@
 .pytest_cache
 .DS_STORE
 .vscode
+notebooks/dolma_checkpoint.json
 tests/__pycache__
 utils/__pycache__
