@@ -1,0 +1,13 @@
+# dolma -c /Users/kaionamartinson/Desktop/Cultural-Analytics/Cultural-Analytics-AAPI/config.yaml tag
+experiment: aapi_test
+
+documents:
+  - /Users/kaionamartinson/Desktop/Cultural-Analytics/Cultural-Analytics-AAPI/data/c4/v0/c4-train.00000.jsonl.gz
+
+taggers:
+  - module: /Users/kaionamartinson/Desktop/Cultural-Analytics/Cultural-Analytics-AAPI/aapi_keywords.py
+    name: aapi_keywords_v1
+    kwargs:
+      keyword_pickle: /Users/kaionamartinson/Desktop/Cultural-Analytics/Cultural-Analytics-AAPI/data/aapiGroups.pkl
+
+
