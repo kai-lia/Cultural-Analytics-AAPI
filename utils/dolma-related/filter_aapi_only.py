@@ -1,16 +1,41 @@
-import gzip, json
+import gzip
+import json
+from pathlib import Path
 
-src_docs = "data/src/v0/c4-train.00000.jsonl.gz"
-tagged = "data/output/tagged/c4-train.00000.jsonl.gz"
-out = "data/output/mixed/aapi_only.jsonl.gz"
+DOCS = Path("data/src/v0/c4-train.00000.jsonl.gz")
+ATTRS = Path("data/output/tagged/c4-train.00000.jsonl.gz")
+OUT = Path("data/output/mixed/documents/data/src/v0/c4-train.00000.jsonl.gz")
+OUT.parent.mkdir(parents=True, exist_ok=True)
 
-with gzip.open(src_docs, "rt") as d, gzip.open(tagged, "rt") as t, gzip.open(out, "wt") as o:
-    for doc_line, tag_line in zip(d, t):
+KEY = "aapi_keywords_v1__aapi_keywords_v1__aapi_keyword"
+
+kept = 0
+total = 0
+
+with gzip.open(DOCS, "rt", encoding="utf-8") as docs_f, gzip.open(
+    ATTRS, "rt", encoding="utf-8"
+) as attrs_f, gzip.open(OUT, "wt", encoding="utf-8") as out_f:
+
+    for doc_line, attr_line in zip(docs_f, attrs_f):
+        total += 1
         doc = json.loads(doc_line)
-        tag = json.loads(tag_line)
-        spans = tag["attributes"].get("aapi_keywords_v1__aapi_keywords_v1__aapi_keyword", [])
-        if spans and spans[0][2] > 0:
-            doc["attributes"] = tag["attributes"]
-            o.write(json.dumps(doc) + "\n")
+        attr = json.loads(attr_line)
 
-print(f"✅ wrote filtered docs → {out}")
+        if doc.get("id") != attr.get("id"):
+            raise ValueError(
+                f"ID mismatch at line {total}: " f"{doc.get('id')} != {attr.get('id')}"
+            )
+
+        attrs = attr.get("attributes", {})
+        spans = attrs.get(KEY, [])
+
+        score = 0.0
+        if spans and spans[0] and len(spans[0]) >= 3:
+            score = float(spans[0][2])
+
+        if score > 0:
+            out_f.write(json.dumps(doc) + "\n")
+            kept += 1
+
+print(f"Done. Kept {kept} / {total} docs with AAPI score > 0.")
+print(f"Output written to: {OUT}")
