@@ -7,6 +7,7 @@ from pathlib import Path
 from dolma import BaseTagger, add_tagger
 from dolma.core.data_types import DocResult, Document, Span
 
+
 def _find_pickle(explicit: str | None) -> Path | None:
     if explicit:
         p = Path(explicit).expanduser().resolve()
@@ -16,11 +17,10 @@ def _find_pickle(explicit: str | None) -> Path | None:
     here = Path(__file__).resolve()
     repo_root = here.parents[2]
 
-    # candidates (now including utils/data/)
     candidates = [
         repo_root / "data" / "aapiGroups.pkl",
         here.parent / "data" / "aapiGroups.pkl",
-        repo_root / "utils" / "data" / "aapiGroups.pkl",  # 👈 add this line
+        repo_root / "utils" / "data" / "aapiGroups.pkl",
         Path.cwd() / "data" / "aapiGroups.pkl",
     ]
 
@@ -29,7 +29,8 @@ def _find_pickle(explicit: str | None) -> Path | None:
             return cand.resolve()
 
     raise FileNotFoundError(
-        "Could not find aapiGroups.pkl. Tried:\n  - " + "\n  - ".join(map(str, candidates))
+        "Could not find aapiGroups.pkl. Tried:\n  - "
+        + "\n  - ".join(map(str, candidates))
     )
 
 
@@ -48,24 +49,25 @@ class AAPIKeywordsTagger(BaseTagger):
             tried = [
                 f"explicit: {keyword_pickle!r}",
                 f"env AAPI_KEYWORDS_PICKLE={os.environ.get('AAPI_KEYWORDS_PICKLE', '')!r}",
-                # show a few likely locations we probed
                 str(here.parent / "data" / "aapiGroups.pkl"),
-                str(here.parents[2] / "data" / "aapiGroups.pkl") if len(here.parents) >= 3 else "(no parents[2])",
+                (
+                    str(here.parents[2] / "data" / "aapiGroups.pkl")
+                    if len(here.parents) >= 3
+                    else "(no parents[2])"
+                ),
                 str(Path.cwd() / "data" / "aapiGroups.pkl"),
             ]
             raise FileNotFoundError(
-                "Could not locate aapiGroups.pkl. Searched:\n  - " + "\n  - ".join(tried) +
-                "\nTip: set env var AAPI_KEYWORDS_PICKLE=/abs/path/to/aapiGroups.pkl"
+                "Could not locate aapiGroups.pkl. Searched:\n  - "
+                + "\n  - ".join(tried)
+                + "\nTip: set env var AAPI_KEYWORDS_PICKLE=/abs/path/to/aapiGroups.pkl"
             )
 
         self.keyword_pickle = resolved
 
         with self.keyword_pickle.open("rb") as f:
             raw_terms = pickle.load(f)
-
-        # normalize terms → list[str]
         terms = [str(t).strip().lower() for t in list(raw_terms)]
-        # guard against empty list
         if not terms:
             raise ValueError(f"No terms found in {self.keyword_pickle}")
 
@@ -77,11 +79,9 @@ class AAPIKeywordsTagger(BaseTagger):
         text = doc.text or ""
         matches = self.regex.findall(text)
         if not matches:
-            # Return a dummy key so Dolma mixer won't treat it as "missing attributes"
             span = Span(start=0, end=0, type="aapi_keyword", score=0.0)
             return DocResult(doc=doc, spans=[span])
             # return DocResult(doc=doc, spans=[])
-
 
         # unique matches → score is count of unique AAPI terms present
         unique_matches = {m.lower() for m in matches}

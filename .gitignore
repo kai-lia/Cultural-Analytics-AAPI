@@ -6,3 +6,4 @@ notebooks/dolma_checkpoint.json
 tests/__pycache__
 utils/__pycache__
 utils/fetchers/__pycache__/
+utils/dolma-related/__pycache__/
