@@ -2,9 +2,10 @@ from datasets import load_dataset
 import json
 import gzip
 from pathlib import Path
+from tqdm.auto import tqdm  
 
 # Where to store the C4-style docs
-out_dir = Path("/data/c4/src")
+out_dir = Path("data/c4/v1")
 out_dir.mkdir(parents=True, exist_ok=True)
 
 # Use the Dolma sample (16.4 GB compressed total, across all sources)
@@ -16,6 +17,9 @@ MAX_DOCS   = 100_000   # bump this if you have disk & want more
 shard_idx = 0
 count = 0
 writer = None
+
+
+pbar = tqdm(total=MAX_DOCS, desc="Exporting C4 docs")
 
 for example in ds:
     # Keep only C4-sourced docs
@@ -39,11 +43,14 @@ for example in ds:
     }
     writer.write(json.dumps(doc) + "\n")
     count += 1
+    pbar.update(1) 
 
     if count >= MAX_DOCS:
         break
 
 if writer is not None:
     writer.close()
+pbar.close
 
 print(f"Exported {count} C4 documents into {shard_idx} shard(s) in {out_dir}")
+print("final pos of shard is", shard_idx)
