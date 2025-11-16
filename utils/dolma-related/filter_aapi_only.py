@@ -2,9 +2,9 @@ import gzip
 import json
 from pathlib import Path
 
-DOCS = Path("data/src/v0/c4-train.00000.jsonl.gz")
-ATTRS = Path("data/output/tagged/c4-train.00000.jsonl.gz")
-OUT = Path("data/output/mixed/documents/data/src/v0/c4-train.00000.jsonl.gz")
+DOCS = Path("data/src/v0/c4-train.00009.jsonl.gz")
+ATTRS = Path("data/output/tagged/c4-train.00009.jsonl.gz")
+OUT = Path("data/output/mixed/documents/data/src/v0/c4-train.00009.jsonl.gz")
 OUT.parent.mkdir(parents=True, exist_ok=True)
 
 KEY = "aapi_keywords_v1__aapi_keywords_v1__aapi_keyword"
