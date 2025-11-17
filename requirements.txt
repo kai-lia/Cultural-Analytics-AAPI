@@ -4,6 +4,7 @@ warcio
 ipykernel
 pytest
 dolma
+spacy
 
 # Hugging Face + streaming stack
 datasets==2.19.1
