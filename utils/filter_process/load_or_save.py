@@ -1,12 +1,68 @@
+#!/usr/bin/env python3
+"""
+SQLite DB for ethnicity lexicon aggregation + progress tracking.
+Stores:
+    - verb_counts
+    - adj_counts
+    - noun_heads
+    - overall aggregated counts (optional artifacts)
+"""
+
+# Imports
+import json
+import pickle
 import sqlite3
 from collections import Counter
 from pathlib import Path
 
-DB_PATH = Path(
-    "/Users/kaionamartinson/Desktop/Cultural-Analytics/Cultural-Analytics-AAPI/data/ethnicity_lexicon.db"
-)
+
+# Paths
+DB_PATH = Path("/data/output/full_pipeline/ethnicity_lexicon.db")
+
+PROGRESS_PATH = Path("/data/output/full_pipeline/aapi_progress.json")
+
+AAPI_PKL_PATH = "Cultural-Analytics-AAPI/data/aapiGroups.pkl"
+
+ARTIFACTS_PATH = Path("data/output/full_pipeline/ethnicity_counts.pkl")
 
 
+def load_aapi_pkl(): 
+    """ loading my pkl and returning"""
+    with AAPI_PKL_PATH .open("rb") as f:
+        aapi_set  = pickle.load(f)
+    # Safety check
+    if not isinstance(aapi_set, set):
+        aapi_set = set(aapi_set)
+
+    print(f"loaded {len(aapi_set)} AAPI keywords")
+    return aapi_set
+
+
+
+# Progress Save / Load
+def save_progress(count: int) -> None:
+    """
+    Save how many C4 docs we've fully traversed/processed.
+    Allows pipeline to resume if interrupted.
+    """
+    PROGRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with PROGRESS_PATH.open("w", encoding="utf-8") as f:
+        json.dump({"c4_docs_done": count}, f)
+
+
+def load_progress() -> int:
+    """
+    Returns how many C4 docs were previously processed.
+    Defaults to 0 if no progress file exists.
+    """
+    if PROGRESS_PATH.exists():
+        with PROGRESS_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return int(data.get("c4_docs_done", 0))
+    return 0
+
+
+# DB Initialization
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
@@ -32,6 +88,7 @@ def init_db():
         );
     """
     )
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS noun_heads (
@@ -45,6 +102,8 @@ def init_db():
     conn.close()
 
 
+
+# DB Insert (Accumulation)
 def flush_all_to_db(
     noun_heads_counter,
     verb_ethnicity_dict,
@@ -95,9 +154,10 @@ def flush_all_to_db(
     conn.close()
 
 
+# DB Load into Dictionaries
 def load_ethnicity_dicts_from_db():
     """
-    Load full verb_ethnicity_dict and adj_ethnicity_dict from DB
+    Load verb_ethnicity_dict and adj_ethnicity_dict from DB
     into the same structure: dict[str, Counter]
     """
     conn = sqlite3.connect(DB_PATH)
@@ -119,11 +179,8 @@ def load_ethnicity_dicts_from_db():
     conn.close()
     return verb_ethnicity_dict, adj_ethnicity_dict
 
-ARTIFACTS_PATH = Path(
-    "/Users/kaionamartinson/Desktop/Cultural-Analytics/Cultural-Analytics-AAPI/ethnicity_counts.pkl"
-)
 
-
+# Artifact Save (Atomic Merge)
 def save_artifacts_safely(aapi_counter_pass) -> None:
     """
     Merge current aapi_counter_pass into whatever is already on disk,
@@ -144,7 +201,7 @@ def save_artifacts_safely(aapi_counter_pass) -> None:
     merged = old_counter.copy()
     merged.update(aapi_counter_pass)
 
-    # Atomic write
+    # Atomic write (avoid corruption)
     tmp_path = ARTIFACTS_PATH.with_suffix(".tmp")
     with tmp_path.open("wb") as f:
         pickle.dump(merged, f)

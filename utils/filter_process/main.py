@@ -7,13 +7,41 @@ import fasttext
 import spacy
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-
-from datasets import load_dataset
-from tqdm import tqdm
-
-from dolma import BaseTagger, add_tagger
-from dolma.core.data_types import DocResult, Document, Span
 from collections import Counter, defaultdict
+
+from tqdm import tqdm
+from datasets import load_dataset
+
+from dolma.core.data_types import Document
+
+from utils.filter_process.pos import collect_adj, collect_verb, build_group_lexicon, ethnicity_modified_nouns
+
+from utils.filter_process.Fasttext.fasttext import (
+    window_mask_sentence,
+    load_fasttext_model
+)
+
+from utils.filter_process.load_or_save import (
+    flush_all_to_db,
+    save_artifacts_safely,
+    load_ethnicity_dicts_from_db,
+    save_progress,
+    init_db,
+    load_aapi_pkl,
+    load_model
+)
+
+
+from utils.filter_process.dolma import (
+    AAPIKeywordsTagger,
+    mix_aapi_doc,
+    AAPITokenizer, 
+    predict_n_mix
+)
+
+
+
+
 
 
 OUTPUT_TOKENIZED_DIR = Path("data/output/tokenized_c4")
@@ -26,9 +54,10 @@ MODEL_PATH = "utils/autotuned_fasttext_model.bin"
 LOCAL_C4_FOLDER = Path("/Users/kaionamartinson/Desktop/Cultural-Analytics/dolma/c4")
 
 
+
+
+
 SHARD_SIZE = 500_000
-
-
 
 
 
@@ -46,6 +75,7 @@ def run_loop(
 
     # --- DB setup ---
     init_db()
+    aapi_keywords = load_aapi_pkl()
 
     # Optionally merge existing DB counts into in-memory dicts
     # so you keep accumulating across runs:
@@ -59,9 +89,11 @@ def run_loop(
         adj_ethnicity_dict.setdefault(eth, Counter()).update(cnts)
 
     # rest of your setup
+
     tagger = AAPIKeywordsTagger()
     tokenizer = AAPITokenizer()
     ds = iter_local_c4_files(LOCAL_C4_FOLDER)
+    model = load_model()
 
     pbar = tqdm(
         total=None,
@@ -75,15 +107,8 @@ def run_loop(
 
     for data in ds:
         pbar.update(1)
-        doc = Document(
-            id=data["id"],
-            text=data["text"],
-            source=data.get("source"),
-        )
-
-        tagged = tagger.predict(doc)
-        mixed = mix_aapi_doc(tagged)
-
+        mixed= predict_n_mix(data, tagger) # predicts and mixes
+        
         if mixed is not None:
             tokenized = tokenizer.tokenize(mixed)
 
@@ -91,7 +116,7 @@ def run_loop(
                 tokens = [t.text for t in sentence]
                 tokens_lower = [t.lower() for t in tokens]
 
-                overlap = set(tokens_lower) & AAPI_KEYWORDS
+                overlap = set(tokens_lower) & aapi_keywords
                 if not overlap:
                     continue
                 overlap_eth = list(overlap)[0]
@@ -170,3 +195,31 @@ def iter_local_c4_files(folder_path):
                     print(f"Skipping bad line: {e}")
                     continue
             print("ending reading this file, no more lines")
+
+
+
+
+
+def main():
+    """
+    Run full ingestion + extraction loop
+    """
+    # In-memory counters
+    noun_heads_counter = Counter()
+    aapi_counter_pass = Counter()
+    verb_ethnicity_dict = defaultdict(Counter)
+    adj_ethnicity_dict = defaultdict(Counter)
+
+    print("Starting AAPI extraction pipeline...")
+    run_loop(
+        noun_heads_counter,
+        aapi_counter_pass,
+        verb_ethnicity_dict,
+        adj_ethnicity_dict,
+        out_dirname=OUTPUT_TOKENIZED_DIR,
+    )
+    print("🏁 Pipeline completed.")
+
+
+if __name__ == "__main__":
+    main()
