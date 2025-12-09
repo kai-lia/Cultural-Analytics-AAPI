@@ -9,3 +9,7 @@ data/input/
 *.duckdb
 *.jsonl.gz
 *.bin
+data/output/
+data/input/
+*.duckdb
+*.jsonl.gz
