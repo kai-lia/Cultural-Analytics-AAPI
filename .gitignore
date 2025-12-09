@@ -4,3 +4,8 @@
 .vscode
 data/state/
 data/output/mixed/
+data/output/
+data/input/
+*.duckdb
+*.jsonl.gz
+*.bin
