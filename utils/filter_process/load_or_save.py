@@ -14,16 +14,18 @@ import pickle
 import sqlite3
 from collections import Counter
 from pathlib import Path
+import duckdb
 
 
 # Paths
-DB_PATH = Path("/data/output/full_pipeline/ethnicity_lexicon.db")
+DB_PATH = Path("data/output/full_pipeline/ethnicity_pos.duckdb")
 
-PROGRESS_PATH = Path("/data/output/full_pipeline/aapi_progress.json")
+PROGRESS_PATH = Path("data/output/full_pipeline/aapi_progress.json")
 
-AAPI_PKL_PATH = "Cultural-Analytics-AAPI/data/aapiGroups.pkl"
+AAPI_PKL_PATH = Path("data/input/aapiGroups.pkl")
 
 ARTIFACTS_PATH = Path("data/output/full_pipeline/ethnicity_counts.pkl")
+
 
 
 def load_aapi_pkl(): 
@@ -36,6 +38,36 @@ def load_aapi_pkl():
 
     print(f"loaded {len(aapi_set)} AAPI keywords")
     return aapi_set
+
+
+
+import json
+
+def save_sentence_modifiers(eth, noun_hits, verb_hits, adj_hits):
+    nouns = sorted(list(noun_hits))
+    verbs = sorted(list(verb_hits))
+    adjs  = sorted(list(adj_hits))
+
+    # Convert lists to JSON strings
+    nouns_json = json.dumps(nouns)
+    verbs_json = json.dumps(verbs)
+    adjs_json  = json.dumps(adjs)
+
+    con = duckdb.connect(str(DB_PATH))
+
+    con.execute("""
+        INSERT INTO ethnicity_sentence_modifiers
+        (ethnicity, nouns, verbs, adjs, count, has_dup)
+        VALUES (?, ?, ?, ?, 1, FALSE)
+        ON CONFLICT (ethnicity, nouns, verbs, adjs)
+        DO UPDATE SET
+            count = ethnicity_sentence_modifiers.count + 1,
+            has_dup = (ethnicity_sentence_modifiers.count + 1) > 1;
+    """, [eth, nouns_json, verbs_json, adjs_json])
+
+    con.close()
+
+
 
 
 
@@ -62,44 +94,24 @@ def load_progress() -> int:
     return 0
 
 
-# DB Initialization
+
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    con = duckdb.connect(str(DB_PATH))
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS verb_counts (
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS ethnicity_modifiers (
             ethnicity TEXT NOT NULL,
-            verb      TEXT NOT NULL,
+            modifier  TEXT NOT NULL,
+            pos       TEXT NOT NULL,
             count     INTEGER NOT NULL,
-            PRIMARY KEY (ethnicity, verb)
+            has_dup   BOOLEAN NOT NULL,
+            PRIMARY KEY (ethnicity, modifier, pos)
         );
-    """
-    )
+    """)
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS adj_counts (
-            ethnicity TEXT NOT NULL,
-            adjective TEXT NOT NULL,
-            count     INTEGER NOT NULL,
-            PRIMARY KEY (ethnicity, adjective)
-        );
-    """
-    )
+    con.close()
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS noun_heads (
-            noun_head TEXT PRIMARY KEY,
-            count     INTEGER NOT NULL
-        );
-    """
-    )
-
-    conn.commit()
-    conn.close()
 
 
 

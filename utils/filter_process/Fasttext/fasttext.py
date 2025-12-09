@@ -7,16 +7,15 @@ Used for:
     - Masking ethnicity terms in sentences for classification tasks
 """
 
-# ===========================
 # Imports
 
 import fasttext
 from typing import List, Optional
+from pathlib import Path
 
 
 # Path to FastText Model
-MODEL_PATH = "utils/Fasttext/autotuned_fasttext_model.bin"
-
+MODEL_PATH = Path("utils/filter_process/Fasttext/autotuned_fasttext_model.bin")
 
 
 def load_fasttext_model() -> Optional[fasttext.FastText._FastText]:
@@ -25,7 +24,7 @@ def load_fasttext_model() -> Optional[fasttext.FastText._FastText]:
     Returns: model or None if loading failed.
     """
     try:
-        model = fasttext.load_model(MODEL_PATH)
+        model = fasttext.load_model(str(MODEL_PATH))
         print(f"FastText model loaded successfully from {MODEL_PATH}")
         return model
 

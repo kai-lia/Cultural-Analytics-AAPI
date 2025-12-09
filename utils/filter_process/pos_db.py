@@ -94,16 +94,9 @@ def get_subjects_for_pred(pred):
 from collections import defaultdict, Counter
 
 def ethnicity_modified_nouns(doc, group_lexicon):
-    """
-    Extract nouns that are syntactically modified by an ethnicity.
-    
-    Returns:
-        dict: {ethnicity: Counter({noun: count})}
-    """
-    results = defaultdict(Counter)
+    results = defaultdict(set)
 
     for tok in doc:
-        # Only detect ethnicity mentions
         eth = tok.lemma_.lower()
         if eth not in group_lexicon:
             continue
@@ -111,17 +104,17 @@ def ethnicity_modified_nouns(doc, group_lexicon):
         group = group_lexicon[eth]
         head = tok.head
 
-        # Two common syntactic cases:
-        # 1) Ethnicity is a modifier of noun ("Filipino workers")
+        # Case 1: ethnicity modifies noun
         if head.pos_ in {"NOUN", "PROPN"} and tok.dep_ in {"amod", "compound"}:
-            results[group][head.lemma_.lower()] += 1
+            results[group].add(head.lemma_.lower())
 
-        # 2) Ethnicity as a compound in multi-token adjectives ("Filipino-American community")
+        # Case 2: ethnicity child noun
         for child in tok.children:
             if child.pos_ in {"NOUN", "PROPN"} and child.dep_ in {"compound", "amod"}:
-                results[group][child.lemma_.lower()] += 1
+                results[group].add(child.lemma_.lower())
 
-    return dict(results)
+    return results
+
 
 
 from spacy.matcher import DependencyMatcher
@@ -164,12 +157,13 @@ def build_verb_dep_matcher(nlp):
 
     return matcher
 
+def collect_verb(doc, group_lexicon):
+    """
+    Return verbs that an ethnicity (or ethnicity-modified noun) performs.
+    Output format: {ethnicity: {verb1, verb2, ...}}
+    """
+    results = defaultdict(set)
 
-def collect_verb(doc, group_lexicon, d):
-    """
-    Extract verbs that an ethnicity or ethnicity-modified subject actively performs.
-    Do NOT extract passive constructions or cases where ethnicity is object.
-    """
     for tok in doc:
         eth = tok.lemma_.lower()
         if eth not in group_lexicon:
@@ -178,16 +172,16 @@ def collect_verb(doc, group_lexicon, d):
         group = group_lexicon[eth]
         head = tok.head
 
-        # Case 1 — ethnicity modifies the grammatical subject of a verb
-        # e.g. "Filipino workers took..."
+        # Case 1 — ethnicity modifies a subject noun that performs verb
         if head.pos_ in {"NOUN", "PROPN"} and tok.dep_ in {"amod", "compound"}:
             if head.dep_ == "nsubj" and head.head.pos_ == "VERB":
-                d.setdefault(group, Counter())[head.head.lemma_.lower()] += 1
+                results[group].add(head.head.lemma_.lower())
 
-        # Case 2 — ethnicity itself is the grammatical SUBJECT of a verb
-        # e.g. "Filipinos tromp..."
-        if tok.dep_ == "nsubj" and tok.head.pos_ == "VERB":
-            d.setdefault(group, Counter())[tok.head.lemma_.lower()] += 1
+        # Case 2 — ethnicity itself is the subject
+        if tok.dep_ == "nsubj" and head.pos_ == "VERB":
+            results[group].add(head.lemma_.lower())
+
+    return results
 
 def build_adj_dep_matcher(nlp):
     matcher = DependencyMatcher(nlp.vocab)
@@ -319,56 +313,62 @@ def clean_adj_string(adj: str) -> str:
 
     return adj
 
+def collect_adj(doc, group_lexicon):
+    """
+    Return adjectives describing ethnic groups.
+    Output format: {ethnicity: {adj1, adj2, ...}}
+    """
+    results = defaultdict(set)
 
-def collect_adj(doc, group_lexicon, d):
-    """
-    Extract adjectives describing ethnic groups.
-    Adds: d[group][adj] += count
-    """
-    # Locate ethnicity mentions first
+    # Find ethnicity tokens
     ethnicity_tokens = [
         tok for tok in doc
         if tok.lemma_.lower() in group_lexicon
     ]
-
     if not ethnicity_tokens:
-        return
+        return results
 
-    for eth in ethnicity_tokens:
-        group = group_lexicon[eth.lemma_.lower()]
-        d.setdefault(group, Counter())
+    for eth_tok in ethnicity_tokens:
+        group = group_lexicon[eth_tok.lemma_.lower()]
 
         for tok in doc:
 
             # Skip the ethnicity token itself
-            if tok == eth or tok.ent_type_ == "NORP":
+            if tok == eth_tok or tok.ent_type_ == "NORP":
                 continue
-            # Skip intensifiers + category words
+
             lemma = tok.lemma_.lower()
+
+            # Skip intensifiers + category terms
             if lemma in INTENSIFIERS or lemma in CATEGORY_ADJ:
                 continue
-            lemma = clean_adj_string(lemma)
 
-            # Skip other ethnicity tokens (don't treat as attribute)
+            # Normalize and clean
+            lemma = clean_adj_string(lemma)
+            if not lemma:
+                continue
+
+            # Skip other ethnicity tokens
             if is_ethnicity_as_modifier(tok, group_lexicon):
                 continue
 
-            # Skip enumeration/listing cases
+            # Skip taxonomy/list cases
             if is_taxonomy_listing(tok):
                 continue
 
-            # Hyphenated adjective?
+            # Handle hyphenated adjectives
             hyphen = is_hyphenated_adj(tok)
             if hyphen:
-                # Only if hyphenated adj modifies this ethnicity
-                if attribute_applies_to_ethnicity(tok, eth):
-                    d[group][hyphen] += 1
-                continue  # skip further processing
+                if attribute_applies_to_ethnicity(tok, eth_tok):
+                    results[group].add(hyphen)
+                continue
 
-            # Only adjectives count
+            # Must be an actual adjective
             if tok.pos_ != "ADJ":
                 continue
 
-            # Ensure **syntactic** link to the ethnicity
-            if attribute_applies_to_ethnicity(tok, eth):
-                d[group][lemma] += 1
+            # Check syntactic relation
+            if attribute_applies_to_ethnicity(tok, eth_tok):
+                results[group].add(lemma)
+
+    return results
