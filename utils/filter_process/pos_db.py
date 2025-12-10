@@ -1,265 +1,79 @@
+# ============================================================
+# pos.py — unified extractor for ethnicity nouns / verbs / adjs
+# ============================================================
 
-# pos.py — AAPI relation extraction
 import re
 import unicodedata
+from collections import defaultdict
 
-from collections import Counter
-from spacy.matcher import DependencyMatcher
-from collections import Counter
+# ------------------------------------------------------------
+# STOPWORD SETS
+# ------------------------------------------------------------
 
+INTENSIFIERS = {
+    "super", "very", "really", "quite", "so", "too", "extremely",
+    "highly", "fairly", "slightly", "pretty", "rather", "especially",
+    "incredibly"
+}
 
+CATEGORY_ADJ = {
+    "ethnic", "certain", "such", "various", "many", "several",
+    "some", "other", "only", "own", "different", "separate",
+    "this", "that", "these", "those"
+}
 
-STOP_ADJ = {"north", "south", "east", "west", "central"}
-
-BAD_VERBS = {"be", "have", "do"}
-BAD_LEMMAS = {"orient"}
-
-
-def tokenize_clean(doc):
-    return [
-        t.lemma_.lower()
-        for t in doc
-        if t.is_alpha and not t.is_stop
-    ]
-
-
+# ------------------------------------------------------------
+# GROUP LEXICON
+# ------------------------------------------------------------
 
 def build_group_lexicon(groups, vocab=None):
-    """
-    Return dict mapping RAW STRING forms -> canonical group name.
-    Includes plural fallback: koreans -> korean
-    """
     lex = {}
-
     for g in groups:
-        g_l = g.lower()
-        lex[g_l] = g_l  # base form
-
-        # plural dictionary fallback
-        if not g_l.endswith("s"):
-            lex[g_l + "s"] = g_l  # filipinos -> filipino
-
+        g = g.lower()
+        lex[g] = g
+        if not g.endswith("s"):
+            lex[g + "s"] = g     # Koreans → korean
     return lex
 
 
+# ------------------------------------------------------------
+# ADJECTIVE CLEANER
+# ------------------------------------------------------------
 
-STOP_ADJ = {"north", "south", "east", "west", "central"}
+def clean_adj_string(lemma: str, tok=None) -> str:
+    """Normalize and preserve correct -ing form."""
+    lemma_clean = unicodedata.normalize("NFKD", lemma).encode(
+        "ascii", "ignore"
+    ).decode("ascii").lower().strip()
 
-def is_directional(adj_str: str) -> bool:
-    """Only operate on lowercase strings."""
-    if not isinstance(adj_str, str):
+    lemma_clean = re.sub(r"[^a-z\-]", "", lemma_clean)
+
+    if tok is not None:
+        text = tok.text.lower()
+        if text.endswith("ing") and not lemma_clean.endswith("ing"):
+            if lemma_clean.endswith("e"):
+                lemma_clean = lemma_clean[:-1]     # hardworke → hardwork
+            lemma_clean = lemma_clean + "ing"       # → hardworking
+
+    return lemma_clean
+
+
+# ------------------------------------------------------------
+# TAXONOMY DETECTOR
+# ------------------------------------------------------------
+
+def is_taxonomy_listing(tok, group_lexicon):
+    lemma = tok.lemma_.lower()
+
+    if lemma not in group_lexicon:
         return False
-    return adj_str in STOP_ADJ or any(s in adj_str for s in STOP_ADJ)
 
-
-
-def get_ethnicity_cache(sentence, group_lexicon):
-    eth_by_i = {}
-    groups_in_sentence = set()
-    for tok in sentence:
-        # allow plural: Filipinos → filipino
-        text_form = tok.text.lower()
-        lemma_form = tok.lemma_.lower()
-
-        eth = (group_lexicon.get(text_form) or
-               group_lexicon.get(lemma_form))
-
-        if eth:
-            eth_by_i[tok.i] = eth
-            groups_in_sentence.add(eth)
-    return eth_by_i, groups_in_sentence
-
-
-def get_subjects_for_pred(pred):
-    subs = [c for c in pred.children if c.dep_ in {"nsubj", "nsubjpass"}]
-    if subs:
-        return subs
-
-    head = pred.head
-    visited = set()
-    while head is not None and head not in visited:
-        visited.add(head)
-        subs = [c for c in head.children if c.dep_ in {"nsubj", "nsubjpass"}]
-        if subs:
-            return subs
-        if head.dep_ in {"conj", "acomp", "attr"} or head.pos_ == "AUX":
-            head = head.head
-        else:
-            break
-    return []
-
-
-
-
-from collections import defaultdict, Counter
-
-def ethnicity_modified_nouns(doc, group_lexicon):
-    results = defaultdict(set)
-
-    for tok in doc:
-        eth = tok.lemma_.lower()
-        if eth not in group_lexicon:
-            continue
-
-        group = group_lexicon[eth]
-        head = tok.head
-
-        # Case 1: ethnicity modifies noun
-        if head.pos_ in {"NOUN", "PROPN"} and tok.dep_ in {"amod", "compound"}:
-            results[group].add(head.lemma_.lower())
-
-        # Case 2: ethnicity child noun
-        for child in tok.children:
-            if child.pos_ in {"NOUN", "PROPN"} and child.dep_ in {"compound", "amod"}:
-                results[group].add(child.lemma_.lower())
-
-    return results
-
-
-
-from spacy.matcher import DependencyMatcher
-
-def build_verb_dep_matcher(nlp):
-    matcher = DependencyMatcher(nlp.vocab)
-
-    # Pattern: Subject → Verb
-    # e.g. "Filipinos cook rice"
-    pattern_active = [
-        {
-            "RIGHT_ID": "verb",
-            "RIGHT_ATTRS": {"POS": "VERB"},
-        },
-        {
-            "LEFT_ID": "verb",
-            "REL_OP": ">",
-            "RIGHT_ID": "subj",
-            "RIGHT_ATTRS": {"DEP": {"IN": ["nsubj", "nsubjpass"]}},
-        },
-    ]
-
-    # Pattern: Passive Agent "by" ethnicity
-    # e.g. "rice is cooked by Filipinos"
-    pattern_passive_agent = [
-        {
-            "RIGHT_ID": "verb",
-            "RIGHT_ATTRS": {"POS": "VERB"},
-        },
-        {
-            "LEFT_ID": "verb",
-            "REL_OP": ">",
-            "RIGHT_ID": "agent",
-            "RIGHT_ATTRS": {"DEP": "agent"},
-        },
-    ]
-
-    matcher.add("ACTIVE_VERB_SUBJ", [pattern_active])
-    matcher.add("PASSIVE_AGENT_VERB", [pattern_passive_agent])
-
-    return matcher
-
-def collect_verb(doc, group_lexicon):
-    """
-    Return verbs that an ethnicity (or ethnicity-modified noun) performs.
-    Output format: {ethnicity: {verb1, verb2, ...}}
-    """
-    results = defaultdict(set)
-
-    for tok in doc:
-        eth = tok.lemma_.lower()
-        if eth not in group_lexicon:
-            continue
-
-        group = group_lexicon[eth]
-        head = tok.head
-
-        # Case 1 — ethnicity modifies a subject noun that performs verb
-        if head.pos_ in {"NOUN", "PROPN"} and tok.dep_ in {"amod", "compound"}:
-            if head.dep_ == "nsubj" and head.head.pos_ == "VERB":
-                results[group].add(head.head.lemma_.lower())
-
-        # Case 2 — ethnicity itself is the subject
-        if tok.dep_ == "nsubj" and head.pos_ == "VERB":
-            results[group].add(head.lemma_.lower())
-
-    return results
-
-def build_adj_dep_matcher(nlp):
-    matcher = DependencyMatcher(nlp.vocab)
-
-    # Pattern 1 — predicate complement (Filipinos are hardworking)
-    pattern_predicate = [
-        {
-            "RIGHT_ID": "adj",
-            "RIGHT_ATTRS": {"POS": "ADJ"},
-        },
-        {
-            "LEFT_ID": "adj",
-            "REL_OP": ">",
-            "RIGHT_ID": "verb",
-            "RIGHT_ATTRS": {"POS": "VERB"},
-        },
-    ]
-
-    # Pattern 2 — direct modifier (Chinese doctors)
-    pattern_amod = [
-        {
-            "RIGHT_ID": "adj",
-            "RIGHT_ATTRS": {"POS": "ADJ"},
-        },
-        {
-            "LEFT_ID": "adj",
-            "REL_OP": ">",
-            "RIGHT_ID": "noun",
-            "RIGHT_ATTRS": {"POS": "NOUN"},
-        },
-    ]
-
-    matcher.add("ETHNICITY_ADJ", [pattern_predicate, pattern_amod])
-    return matcher
-
-
-
-
-from collections import Counter
-
-# Words that never express a trait
-INTENSIFIERS = {
-    "super", "very", "really", "quite", "so", "too", "extremely", "highly",
-    "fairly", "slightly", "pretty", "rather", "especially", "incredibly",
-}
-
-# Words describing category/quantity, not traits
-CATEGORY_ADJ = {
-    "ethnic", "certain", "such", "various", "many", "several", "some",
-    "other", "only", "own", "different", "separate",
-    "this", "that", "these", "those"  # demonstratives
-}
-
-
-def is_hyphenated_adj(tok):
-    """Return hyphenated ADJ-'ADJ/VERB' form if present, else None.
-    Example: 'hard-working' → keep single token
-    """
-    if tok.pos_ != "ADJ":
-        return None
-    nxt = tok.nbor(1) if tok.i + 1 < len(tok.doc) else None
-    nxt2 = tok.nbor(2) if tok.i + 2 < len(tok.doc) else None
-    if nxt and nxt.text == "-" and nxt2 and nxt2.pos_ in {"ADJ", "VERB"}:
-        return f"{tok.text.lower()}-{nxt2.text.lower()}"
-    return None
-
-
-def is_taxonomy_listing(tok):
-    """
-    True if ethnicity is part of structural taxonomy, not a trait:
-        'ethnic groups such as japanese or African Caribbean'
-        '[ETH] or [ETH]'
-    """
-    # Coordinated ethnicity nouns/adjectives in a list
-    if tok.dep_ == "conj" and tok.head.pos_ in {"NOUN", "ADJ"}:
+    if tok.ent_type_ == "NORP":
         return True
 
-    # Head noun subtree includes 'such' (taxonomy marker)
+    if tok.dep_ == "conj" and tok.head.lemma_.lower() in group_lexicon:
+        return True
+
     subtree = [t.text.lower() for t in tok.head.subtree]
     if "such" in subtree and tok.head.pos_ == "NOUN":
         return True
@@ -267,108 +81,210 @@ def is_taxonomy_listing(tok):
     return False
 
 
-def is_ethnicity_as_modifier(tok, group_lexicon):
-    """
-    If token is itself in group lexicon, ignore as attribute.
-    e.g., 'japanese or African Caribbean'
-    """
-    return tok.lemma_.lower() in group_lexicon
+# ------------------------------------------------------------
+# HYPHENATED ADJECTIVE DETECTOR
+# ------------------------------------------------------------
+
+def is_hyphenated_adj(tok):
+    doc = tok.doc
+    i = tok.i
+    if i + 2 >= len(doc):
+        return None, None
+
+    t1, t2, t3 = doc[i], doc[i+1], doc[i+2]
+
+    if t2.text != "-":
+        return None, None
+
+    if not (t3.pos_ in {"ADJ", "VERB"} or t3.text.lower().endswith("ing")):
+        return None, None
+
+    if t1.pos_ not in {"ADJ", "ADV", "VERB"}:
+        return None, None
+
+    combined = f"{t1.text.lower()}{t3.text.lower()}"
+    return combined, [i, i+1, i+2]
 
 
-def attribute_applies_to_ethnicity(adj_tok, eth_tok):
+# ------------------------------------------------------------
+# FIXED PREDICATE-ADJECTIVE DETECTOR (THE KEY FIX)
+# ------------------------------------------------------------
+
+def is_predicate_adj(tok, eth_tok):
     """
-    Ensure the ADJ is **syntactically modifying** the ethnicity.
-    Allowed links:
-      - adj → ethnicity via 'amod' (standard)
-      - adj is 'acomp' with ethnicity as subject
+    Works for:
+        Filipinos are hardworking.
+        Japanese are polite and disciplined.
+    spaCy parses "hardworking" as ROOT(VERB) with "are" as AUX child.
     """
-    # Standard adjective modifier: 'polite japanese people'
-    if adj_tok.dep_ == "amod" and adj_tok.head == eth_tok.head:
+
+    # Look for "are/is/was/were" as AUX child
+    has_be_aux = any(
+        c.pos_ == "AUX" and c.lemma_ == "be"
+        for c in tok.children
+    )
+    if not has_be_aux:
+        return False
+
+    # Check ethnicity is subject of this token
+    has_eth_subject = any(
+        c == eth_tok and c.dep_ in {"nsubj", "nsubjpass"}
+        for c in tok.children
+    )
+
+    return has_eth_subject
+
+
+# ------------------------------------------------------------
+# ADJECTIVE-LIKE DETECTOR
+# ------------------------------------------------------------
+
+def is_adjective_like(tok, eth_tok):
+    text = tok.text.lower()
+
+    if tok.pos_ == "ADJ":
         return True
 
-    # Predicate adjective: 'Japanese people are polite'
-    if adj_tok.dep_ in {"acomp", "attr"}:  # adjective complement
-        # ethnicity must be grammatical subject
-        for child in adj_tok.head.children:
-            if child == eth_tok and child.dep_ in {"nsubj", "nsubjpass"}:
-                return True
+    if text.endswith("ing"):
+        # handled via predicate detector only
+        return True
+
+    if text.endswith("ed"):
+        if tok.dep_ == "amod" and tok.head.pos_ == "NOUN":
+            return True
+        if tok.head.lemma_ == "be":
+            return True
+        return False
 
     return False
 
-def clean_adj_string(adj: str) -> str:
-    """Normalize, strip accents, remove special chars, lowercase."""
-    if not isinstance(adj, str):
-        return ""
 
-    # Normalize unicode accents → ASCII
-    adj = unicodedata.normalize("NFKD", adj).encode("ascii", "ignore").decode("ascii")
+# ------------------------------------------------------------
+# MAIN FUNCTION — UNIFIED EXTRACTION
+# ------------------------------------------------------------
 
-    adj = adj.lower().strip()
+def collect_all_modifiers(doc, group_lexicon):
+    out = defaultdict(lambda: {"nouns": set(), "verbs": set(), "adjs": set()})
 
-    # Keep letters + hyphens ONLY
-    adj = re.sub(r"[^a-z\-]", "", adj)
+    eth_tokens = [t for t in doc if t.lemma_.lower() in group_lexicon]
+    if not eth_tokens:
+        return out
 
-    # Remove double hyphens
-    adj = adj.replace("--", "-")
+    for eth_tok in eth_tokens:
+        eth = group_lexicon[eth_tok.lemma_.lower()]
+        head = eth_tok.head
 
-    return adj
+        # =====================================================
+        # NOUN EXTRACTION
+        # =====================================================
 
-def collect_adj(doc, group_lexicon):
-    """
-    Return adjectives describing ethnic groups.
-    Output format: {ethnicity: {adj1, adj2, ...}}
-    """
-    results = defaultdict(set)
+        if head.pos_ in {"NOUN", "PROPN"} and eth_tok.dep_ in {"amod", "compound"}:
+            out[eth]["nouns"].add(head.lemma_.lower())
 
-    # Find ethnicity tokens
-    ethnicity_tokens = [
-        tok for tok in doc
-        if tok.lemma_.lower() in group_lexicon
-    ]
-    if not ethnicity_tokens:
-        return results
+        for child in eth_tok.children:
+            if child.pos_ in {"NOUN", "PROPN"} and child.dep_ in {"compound", "amod"}:
+                out[eth]["nouns"].add(child.lemma_.lower())
 
-    for eth_tok in ethnicity_tokens:
-        group = group_lexicon[eth_tok.lemma_.lower()]
+        # =====================================================
+        # VERB EXTRACTION
+        # =====================================================
+
+        # "Filipino workers protested"
+        if head.pos_ in {"NOUN", "PROPN"} and eth_tok.dep_ in {"amod", "compound"}:
+            if head.dep_ == "nsubj" and head.head.pos_ == "VERB":
+                out[eth]["verbs"].add(head.head.lemma_.lower())
+
+        # ethnicity itself is subject: "Filipinos protested"
+        if eth_tok.dep_ in {"nsubj", "nsubjpass"} and head.pos_ == "VERB":
+            # avoid predicate adjectives misparsed as verbs
+            if head.text.lower().endswith("ing") and any(
+                c.pos_ == "AUX" and c.lemma_ == "be"
+                for c in head.children
+            ):
+                pass
+            else:
+                out[eth]["verbs"].add(head.lemma_.lower())
+
+                for conj in head.children:
+                    if conj.dep_ == "conj" and conj.pos_ == "VERB":
+                        out[eth]["verbs"].add(conj.lemma_.lower())
+
+        # Passive agent: "cooked by Filipinos"
+        if eth_tok.dep_ == "pobj" and eth_tok.head.dep_ == "agent":
+            verb = eth_tok.head.head
+            if verb.pos_ == "VERB":
+                out[eth]["verbs"].add(verb.lemma_.lower())
+
+        # =====================================================
+        # ADJECTIVE EXTRACTION
+        # =====================================================
+
+        blocked = set()
 
         for tok in doc:
-
-            # Skip the ethnicity token itself
             if tok == eth_tok or tok.ent_type_ == "NORP":
                 continue
 
             lemma = tok.lemma_.lower()
 
-            # Skip intensifiers + category terms
             if lemma in INTENSIFIERS or lemma in CATEGORY_ADJ:
                 continue
-
-            # Normalize and clean
-            lemma = clean_adj_string(lemma)
-            if not lemma:
+            if lemma in group_lexicon:
+                continue
+            if is_taxonomy_listing(tok, group_lexicon):
                 continue
 
-            # Skip other ethnicity tokens
-            if is_ethnicity_as_modifier(tok, group_lexicon):
+            # --- hyphenated adjectives ---
+            hyph, span = is_hyphenated_adj(tok)
+            if hyph:
+                blocked.update(span)
+
+                pred = tok.head
+                if pred.head.lemma_ == "be" and any(
+                    c == eth_tok and c.dep_ in {"nsubj", "nsubjpass"}
+                    for c in pred.head.children
+                ):
+                    out[eth]["adjs"].add(hyph)
+                    continue
+
+                if tok.head == eth_tok:
+                    out[eth]["adjs"].add(hyph)
+                    continue
+
                 continue
 
-            # Skip taxonomy/list cases
-            if is_taxonomy_listing(tok):
+            # --- normal adjectives ---
+            if not is_adjective_like(tok, eth_tok):
                 continue
 
-            # Handle hyphenated adjectives
-            hyphen = is_hyphenated_adj(tok)
-            if hyphen:
-                if attribute_applies_to_ethnicity(tok, eth_tok):
-                    results[group].add(hyphen)
+            clean = clean_adj_string(lemma, tok)
+
+            # Proper predicate handling (THE KEY FIX)
+            if is_predicate_adj(tok, eth_tok):
+                out[eth]["adjs"].add(clean)
                 continue
 
-            # Must be an actual adjective
-            if tok.pos_ != "ADJ":
+            # coordinated adjectives: polite and hardworking
+            if tok.dep_ == "conj" and tok.head.pos_ == "ADJ":
+                if is_predicate_adj(tok.head, eth_tok):
+                    out[eth]["adjs"].add(clean)
+                    continue
+
+            # attributive: hardworking Filipino workers
+            if tok.dep_ == "amod" and tok.head == eth_tok.head:
+                out[eth]["adjs"].add(clean)
                 continue
 
-            # Check syntactic relation
-            if attribute_applies_to_ethnicity(tok, eth_tok):
-                results[group].add(lemma)
+            # fragment: "Japanese super polite"
+            if eth_tok.i < tok.i:
+                between = doc[eth_tok.i + 1 : tok.i]
+                if not any(t.pos_ == "VERB" for t in between):
+                    out[eth]["adjs"].add(clean)
+                    continue
 
-    return results
+    return out
+
+
+
+
+
