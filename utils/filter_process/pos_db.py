@@ -1,7 +1,3 @@
-# ============================================================
-# pos.py — unified extractor for ethnicity nouns / verbs / adjs
-# ============================================================
-
 import re
 import unicodedata
 from collections import defaultdict
@@ -13,18 +9,18 @@ from collections import defaultdict
 INTENSIFIERS = {
     "super", "very", "really", "quite", "so", "too", "extremely",
     "highly", "fairly", "slightly", "rather", "especially",
-    "incredibly, most"
+    "incredibly, most", "more"
 }
 
 CATEGORY_ADJ = {
     "ethnic", "certain", "such", "various", "many", "several",
     "some", "other", "only", "own", "different", "separate",
-    "this", "that", "these", "those"
+    "this", "that", "these", "those", "most"
 }
 
 NEVER_ADJ_POS = {
     "DET", "AUX", "CCONJ", "SCONJ", "ADP", "PART", "INTJ",
-    "SYMBOL", "NUM", "PUNCT", "X", "SPACE", "PRON"
+    "SYMBOL", "NUM", "PUNCT", "SPACE", "PRON"
 }
 
 # ------------------------------------------------------------
@@ -153,18 +149,57 @@ def is_adjective_like(tok, eth_tok):
 
     if tok.pos_ == "ADJ":
         return True
-
-
+    
+     # CASE 2: Present participles used as adjectives (VBG)
     if tok.pos_ == "VERB" and tok.tag_ == "VBG":
-        # only accept if it modifies eth_tok itself (rare)
+        # attributive: "welcoming Chinese"
         if tok.dep_ == "amod" and tok.head == eth_tok:
             return True
-        # or if it's a predicate adjective with ethnic subject
-        if eth_tok.dep_ == "nsubj" and eth_tok.head == tok.head and tok.dep_ == "acomp":
+        # predicative: "Chinese are welcoming"
+        if eth_tok.dep_ == "nsubj" and tok.dep_ == "acomp":
             return True
         return False
 
+    # CASE 3: Past participles used as adjectives (VBN)
+    if tok.pos_ == "VERB" and tok.tag_ == "VBN":
+        # attributive: "the mixed Chinese population"
+        if tok.dep_ == "amod" and tok.head == eth_tok:
+            return True
+        # predicative: "Chinese are united"
+        if eth_tok.dep_ == "nsubj" and tok.dep_ == "acomp":
+            return True
+        return False
+
+    # Other POS cannot function as adjectives
     return False
+
+def verb_like(head, eth, out):
+    for child in head.children:
+    
+        if child.pos_ != "VERB":
+            continue
+
+        if child.dep_ not in {"acl", "relcl"}:
+            continue
+
+        if child.head != head:
+            continue
+
+        # NEW: ensure the clause's subject refers to this noun
+        subj = None
+        for gc in child.children:
+            if gc.dep_ in {"nsubj", "nsubjpass"}:
+                subj = gc
+                break
+
+        # reject: one → heard (bad)
+        # reject: I → think (bad)
+        # reject: which → is (bad)
+        if subj and subj != head and subj.head != head:
+            continue
+
+        # accept only genuine describing verbs:
+        out[eth]["verbs"].add(child.lemma_.lower())
 
 
 # ------------------------------------------------------------
@@ -234,14 +269,15 @@ def collect_all_modifiers(doc, group_lexicon):
                             if sib.dep_ == "conj" and sib.pos_ == "VERB":
                                 out[eth]["verbs"].add(sib.lemma_.lower())
 
-
-        # "Filipino workers protested"
         if head.pos_ in {"NOUN", "PROPN"} and eth_tok.dep_ in {"amod", "compound"}:
-            if head.dep_ == "nsubj" and head.head.pos_ == "VERB":
-                out[eth]["verbs"].add(head.head.lemma_.lower())
+            verb_like(head, eth, out)
+
+        
 
         # ethnicity itself is subject: "Filipinos protested"
         if eth_tok.dep_ in {"nsubj", "nsubjpass"} and head.pos_ == "VERB":
+            if eth_tok.head.dep_ != "ROOT":
+                continue
             # avoid predicate adjectives misparsed as verbs
             if head.text.lower().endswith("ing") and any(
                 c.pos_ == "AUX" and c.lemma_ == "be"
@@ -278,6 +314,22 @@ def collect_all_modifiers(doc, group_lexicon):
                 continue
             if lemma in INTENSIFIERS or lemma in CATEGORY_ADJ:
                 continue
+            if tok.text.lower() in {"st", "nd", "rd", "th"}: # hard fix
+                continue
+
+
+
+
+
+            if tok.head.pos_ == "NOUN":
+                # If head is the predicate noun (attr) connected to the same copula as ethnicity, allow it
+                if tok.head.dep_ == "attr" and tok.head.head == eth_tok.head:
+                    pass  # keep it
+                else:
+                    # Otherwise skip if it's not the ethnicity noun or the noun ethnicity modifies
+                    if tok.head != eth_tok and tok.head != eth_tok.head:
+                        continue
+
             
            
 
@@ -301,6 +353,9 @@ def collect_all_modifiers(doc, group_lexicon):
                     out[eth]["adjs"].add(hyph)
                     continue
 
+                continue
+
+            if tok.pos_ not in {"ADJ", "VERB"}:
                 continue
 
             # --- normal adjectives ---

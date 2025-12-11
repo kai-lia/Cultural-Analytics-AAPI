@@ -1,8 +1,8 @@
 import os
 import re
+import sys
 import json
 import gzip
-import pickle
 import fasttext
 import spacy
 from pathlib import Path
@@ -12,13 +12,19 @@ from collections import defaultdict, Counter
 from tqdm import tqdm
 from datasets import load_dataset
 
+
+
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+
+
 from dolma.core.data_types import Document
 
 from utils.filter_process.pos_db import (
-    collect_adj,
-    collect_verb,
     build_group_lexicon,
-    ethnicity_modified_nouns,
+    collect_all_modifiers,
 )
 
 from utils.filter_process.Fasttext.fasttext import (
@@ -40,7 +46,6 @@ from utils.filter_process.dolma_local import (
 )
 
 import duckdb
-
 
 # ------------------------------------------------------------
 # OUTPUT PATHS
@@ -79,7 +84,6 @@ def save_pos_to_db(noun_hits, verb_hits, adj_hits, con):
         verbs_json = json.dumps(verbs)
         adjs_json  = json.dumps(adjs)
 
-        print(eth, nouns, verbs, adjs)
 
         con.execute("""
             INSERT INTO ethnicity_sentence_modifiers
@@ -125,14 +129,17 @@ def run_loop(aapi_counter_pass, con):
         # ---------------------------------------------
         # DOC-LEVEL UNIQUE SETS
         # ---------------------------------------------
-        doc_adj_hits = defaultdict(set)
-        doc_verb_hits = defaultdict(set)
-        doc_noun_hits = defaultdict(set)
+        doc_mod_hits = defaultdict(lambda: {
+            "nouns": set(),
+            "verbs": set(),
+            "adjs": set()
+        })
 
         # ---------------------------------------------
         # SENTENCE LOOP
         # ---------------------------------------------
         for sentence in tokenized.sents:
+            
             tokens = [t.text for t in sentence]
             tokens_lower = [t.lower() for t in tokens]
 
@@ -142,13 +149,6 @@ def run_loop(aapi_counter_pass, con):
                 continue
 
             overlap_eth = list(overlap)[0]
-            lex = build_group_lexicon(overlap)
-
-            # Nouns
-            noun = ethnicity_modified_nouns(sentence, lex)
-            if noun and "noun" in noun:
-                doc_noun_hits[overlap_eth].add(noun["noun"])
-
             # Fasttext filtering
             aapi_counter_pass[overlap_eth] += 1
 
@@ -163,24 +163,22 @@ def run_loop(aapi_counter_pass, con):
 
             aapi_counter_pass[overlap_eth] += 1
 
-            # POS extraction
-            adj_local = collect_adj(sentence, lex)
-            verb_local = collect_verb(sentence, lex)
+            aapi_counter_pass.update(overlap)
 
-            for eth, adjs in adj_local.items():
-                doc_adj_hits[eth].update(adjs)
+            # Unified POS collection
+            lex = build_group_lexicon(overlap)
 
-            for eth, verbs in verb_local.items():
-                doc_verb_hits[eth].update(verbs)
-            sentence
+           
 
-        # END OF DOCUMENT — COMMIT MODIFIERS TO DB
-        save_pos_to_db(
-            noun_hits=doc_noun_hits,
-            verb_hits=doc_verb_hits,
-            adj_hits=doc_adj_hits, 
-            con=con
-        )
+            mods = collect_all_modifiers(sentence, lex)
+    
+            # Merge into doc-level accumulator
+            save_pos_to_db(
+            {eth: d["nouns"] for eth, d in mods.items()},
+            {eth: d["verbs"] for eth, d in mods.items()},
+            {eth: d["adjs"]  for eth, d in mods.items()},
+            con)
+    
 
         traversed += 1
 
@@ -204,7 +202,7 @@ def iter_local_c4_files(folder_path):
         return
 
     for gz_file in files:
-        print(f"→ Reading: {gz_file.name}")
+        print(f"Reading: {gz_file.name}")
         with gzip.open(gz_file, "rt", encoding="utf-8") as f:
             for line in f:
                 try:

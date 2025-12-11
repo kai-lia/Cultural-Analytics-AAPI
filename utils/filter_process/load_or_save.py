@@ -100,13 +100,14 @@ def init_db():
     con = duckdb.connect(str(DB_PATH))
 
     con.execute("""
-        CREATE TABLE IF NOT EXISTS ethnicity_modifiers (
+        CREATE TABLE IF NOT EXISTS ethnicity_sentence_modifiers (
             ethnicity TEXT NOT NULL,
-            modifier  TEXT NOT NULL,
-            pos       TEXT NOT NULL,
+            adjs      TEXT NOT NULL,
+            verbs     TEXT NOT NULL,
+            nouns     TEXT NOT NULL,
             count     INTEGER NOT NULL,
             has_dup   BOOLEAN NOT NULL,
-            PRIMARY KEY (ethnicity, modifier, pos)
+            PRIMARY KEY (ethnicity, adjs, verbs, nouns)
         );
     """)
 

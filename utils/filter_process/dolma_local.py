@@ -71,8 +71,6 @@ def predict_n_mix(data, tagger):
 
 
 
-
-
 import re
 import spacy
 from spacy.tokenizer import Tokenizer
@@ -180,11 +178,10 @@ class AAPITokenizer:
             return text
 
         def replacer(match):
-            raw = match.group(0)          # exact matched text
+            raw = match.group(0)         
             lower = raw.lower()
-            norm = lower.replace("-", " ")  # normalize hyphens → spaces
+            norm = lower.replace("-", " ")  
             merged = self.multiword_map.get(norm)
-            print(f"[MATCH] raw='{raw}' → norm='{norm}' → merged='{self.multiword_map.get(norm)}'")
             if merged:
                 return merged
             # fallback (should rarely happen)

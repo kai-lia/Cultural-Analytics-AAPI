@@ -21,11 +21,7 @@ from filter_process.pos_db import (
 nlp = spacy.load("en_core_web_sm")
 
 GROUPS = {"filipino", "korean", "japanese", "chinese", "vietnamese", "thai", "maori", "indian"}
-GL = build_group_lexicon(GROUPS, nlp.vocab)
 
-
-# ----
-GROUPS = {"filipino", "korean", "japanese", "chinese", "vietnamese", "thai", "maori", "indian"}
 GL = build_group_lexicon(GROUPS)
 
 
@@ -203,6 +199,23 @@ def test_chinese_ancient_soups():
     assert out["chinese"]["verbs"] == {"enjoy"}  # lemma handling
     assert out["chinese"]["adjs"] == {"ancient"}
 
+def test_chinese_protest():
+    out = run("Chinese people protested, marched, and demanded action.")
+    # Only keep true ethnicity-modifying adjectives (no gerunds like "making/dating/finding")
+    assert out["chinese"]["nouns"] == {"people"}
+    assert out["chinese"]["verbs"] == {"protest", "march", "demand"}  # lemma handling
+
+def test_chinese_artist():
+    out = run("Chinese artists, incredibly talented in their craft, paint glorious portraits.")
+    # Only keep true ethnicity-modifying adjectives (no gerunds like "making/dating/finding")
+    assert out["chinese"]["nouns"] == {"artist"}
+    assert out["chinese"]["adjs"] == {"talented"}  # lemma handling
+
+
+    
+
+
+
 
 def test_thai_billionaire_accurate():
     out = run("He’s a Thai billionaire no one’s ever heard of, which I think is still pretty accurate.")
@@ -214,11 +227,12 @@ def test_thai_billionaire_accurate():
 
 
 def new_test(): 
-    out = run("Korean women are still worried about the latter concern to exfoliate.")
-    print(out)
 
-    out = run("Not so much the Indian accented guy who wants to help me fix my computer.")
-    print(out)
+    out = run("Korean women are still worried about the latter concern to exfoliate.")
+    assert out["korean"]["nouns"] == {"women"}
+    assert out["korean"]["verbs"] == set()
+    assert out["korean"]["adjs"] == {"worried"}
+  
 
 
     out = run("Defence analyst Lt General Abdul Qayyum (retd) said the Chinese nation had surprised the entire world by exhibiting extraordinary resilience, courage and guts by bravely facing and surmounting unprecedented challenges in the last 16 years.")
@@ -233,5 +247,6 @@ def new_test():
 
 
 
+
 if __name__ == "__main__":
-    new_test()
+    test_thai_billionaire_accurate()
