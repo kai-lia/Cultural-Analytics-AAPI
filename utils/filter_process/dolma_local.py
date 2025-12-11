@@ -142,7 +142,8 @@ class AAPITokenizer:
         # 5. Load spaCy normally
         # ---------------------------------------------------
         
-        self.nlp = spacy.load("en_core_web_sm")
+        self.nlp = spacy.load("en_core_web_sm", disable=[ "ner"])
+
         
 
         # Add special-case tokens ONLY for single-word ethnicities

@@ -91,7 +91,7 @@ def is_hyphenated_adj(tok):
      # Left part must be an adjective-like token
     if t1.pos_ not in {"ADJ", "ADV"}:
         # Allow cases like "Filipino-American"
-        if t1.pos_ == "PROPN" or t1.ent_type_ == "NORP":
+        if t1.pos_ == "PROPN":
             pass
         else:
             return None, None
@@ -307,7 +307,7 @@ def collect_all_modifiers(doc, group_lexicon):
             if tok.pos_ in NEVER_ADJ_POS: # speeeeding up proceses
                 continue
             #checking if ethnic term
-            if tok == eth_tok or tok.ent_type_ == "NORP": # removes tems like chinese malay
+            if tok == eth_tok: # removes tems like chinese malay
                 continue
             lemma = tok.lemma_.lower()
             if lemma in group_lexicon:

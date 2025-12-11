@@ -1,7 +1,7 @@
 import os
 import re
 import sys
-import json
+import ujson as json
 import gzip
 import fasttext
 import spacy
@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
 import threading
 thread_local = threading.local()
+
+import time
 
 
 
@@ -93,6 +95,31 @@ def get_tokenizer():
 
 
 
+import re
+
+MAX_TOKENS_BEFORE_SKIP = 120   # you can tune this
+
+def simple_pre_split(text):
+    """
+    Fast pre-split to avoid giving massive or malformed lines to spaCy.
+    """
+    # crude sentence split on punctuation
+    raw_sents = re.split(r"[.!?]+", text)
+
+    for s in raw_sents:
+        s = s.strip()
+        if not s:
+            continue
+
+        # Skip "monster" sentences that cause 20–40 second spaCy freezes
+        if len(s.split()) > MAX_TOKENS_BEFORE_SKIP:
+            continue
+
+        yield s
+
+
+
+
 
 
 def db_writer(queue: Queue, stop_signal: object):
@@ -107,6 +134,8 @@ def db_writer(queue: Queue, stop_signal: object):
             break
 
         batch.append(item)
+        #if len(batch) % 50 == 0:
+        #    print("DB writer draining... queue now:", queue.qsize())
 
         if len(batch) >= BATCH_SIZE:
 
@@ -165,8 +194,26 @@ def process_batch(batch, tagger, q):
 
     if not mixed_list:
         return
+    
 
-    docs = tokenizer.pipe_batch(mixed_list)
+    
+    #start = time.time()
+    safe_texts = []
+    safe_mixed = []
+
+    for item in mixed_list:
+        # item["text"] is your document
+        for s in simple_pre_split(item["text"]):
+            safe_texts.append(s)
+            safe_mixed.append(item)
+
+    if not safe_texts:
+        return
+
+    docs = tokenizer.nlp.pipe(safe_texts, batch_size=BATCH_SIZE_NLP)
+
+
+    #print("spaCy batch time:", time.time() - start)
 
     for doc, mixed in zip(docs, mixed_list):
         noun_hits = defaultdict(set)
@@ -222,7 +269,12 @@ def process_batch(batch, tagger, q):
 
 
 
-BATCH_SIZE_NLP = 50   # good default
+BATCH_SIZE_NLP = 150   # good default
+
+
+
+
+
 
 def run_loop(aapi_counter_pass):
     tagger = AAPIKeywordsTagger(AAPI_KEYWORDS)
@@ -248,20 +300,19 @@ def run_loop(aapi_counter_pass):
                     pool.submit(process_batch, list(batch), tagger, q)
                 )
                 batch.clear()
-            pbar.update(1)
+            pbar.update(5000)
 
         # Process final partial batch
         if batch:
             futures.append(
                 pool.submit(process_batch, list(batch), tagger, q)
             )
-            pbar.update(1)
+            pbar.update(5000)
 
         for f in as_completed(futures):
             f.result()  
             qs = q.qsize()
            
-
             if qs > 2000:
                 print(f"Queue size: {qs}")
                 print("Queue growing, DB writer might be falling behind!")
@@ -295,11 +346,16 @@ def iter_local_c4_files(folder_path):
         with gzip.open(gz_file, "rt", encoding="utf-8") as f:
             
             for line in f:
+                #t0 = time.time()
                 
                 try:
                     yield json.loads(line)
                 except Exception:
                     continue
+                #t1 = time.time()
+                #if t1 - t0 > 0.01:   # any slow parse
+                #    print(f"SLOW JSON LOAD: {t1 - t0:.4f}s line length={len(line)}")
+
 
 
 # ===================================================================
