@@ -1,24 +1,38 @@
 import os
 import re
+import sys
 import json
 import gzip
-import pickle
 import fasttext
 import spacy
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from collections import Counter, defaultdict
+from collections import defaultdict, Counter
+
+from concurrent.futures import as_completed
 
 from tqdm import tqdm
 from datasets import load_dataset
 
+from queue import Queue
+import threading
+
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+
+
+
+
+from pathlib import Path
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT))
+
+
+
 from dolma.core.data_types import Document
 
-from utils.filter_process.pos import (
-    collect_adj,
-    collect_verb,
+from utils.filter_process.pos_db import (
     build_group_lexicon,
-    ethnicity_modified_nouns,
+    collect_all_modifiers,
 )
 
 from utils.filter_process.Fasttext.fasttext import (
@@ -27,11 +41,8 @@ from utils.filter_process.Fasttext.fasttext import (
 )
 
 from utils.filter_process.load_or_save import (
-    flush_all_to_db,
-    save_artifacts_safely,
-    load_ethnicity_dicts_from_db,
-    save_progress,
     init_db,
+    save_progress,
     load_aapi_pkl,
 )
 
@@ -42,6 +53,7 @@ from utils.filter_process.dolma_local import (
     predict_n_mix,
 )
 
+import duckdb
 
 # ------------------------------------------------------------
 # OUTPUT PATHS
@@ -53,185 +65,156 @@ OUTPUT_TOKENIZED_DIR.mkdir(parents=True, exist_ok=True)
 PROGRESS_PATH = Path("data/state/c4_progress.json")
 PROGRESS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-MODEL_PATH = Path("utils/autotuned_fasttext_model.bin")
 LOCAL_C4_FOLDER = Path("/Users/kaionamartinson/Desktop/Cultural-Analytics/dolma/c4")
 
 
-# ===================================================================
-# MAIN PROCESSING LOOP
-# ===================================================================
+DB_PATH = Path("data/output/full_pipeline/ethnicity_pos.duckdb")
 
-def run_loop(
-    noun_heads_counter,
-    aapi_counter_pass,
-    verb_ethnicity_dict,
-    adj_ethnicity_dict,
-    out_dirname: Path = OUTPUT_TOKENIZED_DIR,
-) -> None:
+MODEL =  load_fasttext_model()
+AAPI_KEYWORDS = load_aapi_pkl()
 
-    traversed = 0
+MAX_OUTSTANDING = 2000
 
-    # ---------- DB INIT ----------
-    init_db()
-    aapi_keywords = load_aapi_pkl()
 
-    # Load existing counts (if any) to continue a previous run
-    db_verb_dict, db_adj_dict = load_ethnicity_dicts_from_db()
 
-    for eth, cnts in db_verb_dict.items():
-        verb_ethnicity_dict.setdefault(eth, Counter()).update(cnts)
 
-    for eth, cnts in db_adj_dict.items():
-        adj_ethnicity_dict.setdefault(eth, Counter()).update(cnts)
+import json
 
-    tagger = AAPIKeywordsTagger(aapi_keywords)
-    tokenizer = AAPITokenizer(aapi_keywords)
-    ds = iter_local_c4_files(LOCAL_C4_FOLDER)
-    model = load_fasttext_model()
 
-    pbar = tqdm(
-        total=None,
-        desc="Processing C4 docs",
-        mininterval=0.5,
-        dynamic_ncols=True,
-        leave=True,
-    )
 
-    docs_in_shard = 0
+def db_writer(queue: Queue, stop_signal: object):
+    con = duckdb.connect(str(DB_PATH))
 
-    # ==========================================================
-    #     DOCUMENT LOOP
-    # ==========================================================
-    for data in ds:
-        pbar.update(1)
+    while True:
+        item = queue.get()
+        if item is stop_signal:
+            break
 
-        mixed = predict_n_mix(data, tagger)
-        if mixed is None:
+        noun_hits, verb_hits, adj_hits = item
+        save_pos_to_db(noun_hits, verb_hits, adj_hits, con)
+
+    con.close()
+
+
+def save_pos_to_db(noun_hits, verb_hits, adj_hits, con):
+    # For each ethnicity in this document:
+    ethnicities = set(noun_hits.keys()) | set(verb_hits.keys()) | set(adj_hits.keys())
+
+    for eth in ethnicities:
+        nouns = sorted(list(noun_hits.get(eth, set())))
+        verbs = sorted(list(verb_hits.get(eth, set())))
+        adjs  = sorted(list(adj_hits.get(eth, set())))
+
+        if  not verbs and not adjs:
             continue
 
-        tokenized = tokenizer.tokenize(mixed)
+        nouns_json = json.dumps(nouns)
+        verbs_json = json.dumps(verbs)
+        adjs_json  = json.dumps(adjs)
 
-        # ------------------------------------------------------
-        # NEW: Per-DOCUMENT unique modifier sets
-        # These ensure each modifier is counted ONCE PER DOC
-        # ------------------------------------------------------
-        doc_adj_hits = defaultdict(set)
-        doc_verb_hits = defaultdict(set)
-        doc_noun_hits = defaultdict(set)
 
-        # ======================================================
-        #     SENTENCE LOOP
-        # ======================================================
-        for sentence in tokenized.sents:
+        con.execute("""
+            INSERT INTO ethnicity_sentence_modifiers
+            (ethnicity, adjs, verbs, nouns, count, has_dup)
+            VALUES (?, ?, ?, ?, 1, FALSE)
+            ON CONFLICT (ethnicity, adjs, verbs, nouns)
+            DO UPDATE SET
+                count = ethnicity_sentence_modifiers.count + 1,
+                has_dup = (ethnicity_sentence_modifiers.count + 1) > 1;
+        """, [eth, adjs_json, verbs_json, nouns_json])
 
-            tokens = [t.text for t in sentence]
-            tokens_lower = [t.lower() for t in tokens]
 
-            # Overlap with ethnicity keywords
-            overlap = set(tokens_lower) & aapi_keywords
-            if not overlap:
-                continue
 
-            overlap_eth = list(overlap)[0]
+def process_single_doc(data, tagger, tokenizer):
+    noun_hits = defaultdict(set)
+    verb_hits = defaultdict(set)
+    adj_hits  = defaultdict(set)
 
-            lex = build_group_lexicon(overlap)
+    mixed = predict_n_mix(data, tagger)
+    if mixed is None:
+        return None
 
-            # -------------------------
-            # NOUN HEAD EXTRACTION
-            # -------------------------
-            noun = ethnicity_modified_nouns(sentence, lex)
-            if noun and "noun" in noun:
-                noun_head = noun["noun"]
-                doc_noun_hits[overlap_eth].add(noun_head)
+    tokenized = tokenizer.tokenize(mixed)
 
-            # -------------------------
-            # AAPI FASTTEXT FILTER
-            # -------------------------
-            aapi_counter_pass[overlap_eth] += 1
+    for sentence in tokenized.sents:
+        tokens = [t.text for t in sentence]
+        tokens_lower = [t.lower() for t in tokens]
 
-            window_text = (
-                window_mask_sentence(overlap_eth, tokens, tokens_lower)
-                .replace("\n", " ")
-                .strip()
+        overlap = set(tokens_lower) & AAPI_KEYWORDS
+        if not overlap:
+            continue
+
+        eth = list(overlap)[0]
+
+        window_text = (
+            window_mask_sentence(eth, tokens, tokens_lower)
+            .replace("\n", " ")
+            .strip()
+        )
+
+        if MODEL.predict(window_text)[0][0] == "__label__0":
+            continue
+
+        lex = build_group_lexicon(overlap)
+        mods = collect_all_modifiers(sentence, lex)
+
+        for e, m in mods.items():
+            noun_hits[e].update(m["nouns"])
+            verb_hits[e].update(m["verbs"])
+            adj_hits[e].update(m["adjs"])
+
+    return noun_hits, verb_hits, adj_hits
+
+
+
+def run_loop(aapi_counter_pass):
+
+    # Load shared objects ONCE — safe for threads
+    tagger = AAPIKeywordsTagger(AAPI_KEYWORDS)
+    tokenizer = AAPITokenizer(AAPI_KEYWORDS)
+
+    ds = iter_local_c4_files(LOCAL_C4_FOLDER)
+
+    # --- queue for results ---
+    q = Queue()
+    STOP = object()
+
+    # --- start DB writer thread ---
+    writer_thread = threading.Thread(target=db_writer, args=(q, STOP))
+    writer_thread.start()
+
+    # --- Thread pool for CPU-bound workers ---
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = []
+
+        for data in ds:
+            futures.append(
+                pool.submit(
+                    process_single_doc,
+                    data,
+                    tagger,
+                    tokenizer,
+                )
             )
+        if len(futures) >= MAX_OUTSTANDING:
+            done, futures = wait(futures, return_when=FIRST_COMPLETED)
+            for f in done:
+                result = f.result()
+                if result:
+                    q.put(result)
 
-            if model.predict(window_text)[0][0] == "__label__0":
+        for f in tqdm(as_completed(futures), total=len(futures), desc="Collecting results"):
+            result = f.result()
+            if result is None:
                 continue
+            q.put(result)
 
-            aapi_counter_pass[overlap_eth] += 1
+    # Tell writer to stop
+    q.put(STOP)
+    writer_thread.join()
 
-            # -------------------------
-            # ADJECTIVE EXTRACTION
-            # -------------------------
-            adj_local = collect_adj(sentence, lex)
-            for eth, adjs in adj_local.items():
-                doc_adj_hits[eth].update(adjs)
-
-            # -------------------------
-            # VERB EXTRACTION
-            # -------------------------
-            verb_local = collect_verb(sentence, lex)
-            for eth, verbs in verb_local.items():
-                doc_verb_hits[eth].update(verbs)
-
-        # ======================================================
-        #     END OF DOCUMENT: UPDATE MASTER COUNTERS
-        # ======================================================
-        for eth, adjs in doc_adj_hits.items():
-            for adj in adjs:
-                adj_ethnicity_dict[eth][adj] += 1
-
-        for eth, verbs in doc_verb_hits.items():
-            for verb in verbs:
-                verb_ethnicity_dict[eth][verb] += 1
-
-        for eth, nouns in doc_noun_hits.items():
-            for noun in nouns:
-                noun_heads_counter[noun] += 1
-
-        # ======================================================
-        #     BATCH FLUSH (every 10k docs)
-        # ======================================================
-        docs_in_shard += 1
-        traversed += 1
-
-        if docs_in_shard > 0 and docs_in_shard % 10000 == 0:
-
-            save_artifacts_safely(aapi_counter_pass)
-
-            flush_all_to_db(
-                noun_heads_counter,
-                verb_ethnicity_dict,
-                adj_ethnicity_dict,
-            )
-
-            noun_heads_counter.clear()
-            verb_ethnicity_dict.clear()
-            adj_ethnicity_dict.clear()
-
-    # ==========================================================
-    # FINAL SAVE
-    # ==========================================================
-    pbar.close()
-
-    save_artifacts_safely(aapi_counter_pass)
-
-    flush_all_to_db(
-        noun_heads_counter,
-        verb_ethnicity_dict,
-        adj_ethnicity_dict,
-    )
-
-    save_progress(traversed)
-
-
-
-# ===================================================================
-# ITERATOR FOR LOCAL C4 FILES
-# ===================================================================
 
 def iter_local_c4_files(folder_path):
-    """Iterate through local C4 .json(.gz) files"""
     folder_path = Path(folder_path)
 
     files = sorted([
@@ -242,16 +225,15 @@ def iter_local_c4_files(folder_path):
     print(f"Found {len(files)} C4 files in {folder_path}")
 
     if not files:
-        print("⚠ No matching C4 files found! Check extension.")
+        print("⚠ No matching C4 files found!")
         return
 
     for gz_file in files:
-        print(f"→ Reading: {gz_file.name}")
+        print(f"Reading: {gz_file.name}")
         with gzip.open(gz_file, "rt", encoding="utf-8") as f:
             for line in f:
                 try:
-                    data = json.loads(line)
-                    yield data
+                    yield json.loads(line)
                 except Exception:
                     continue
 
@@ -261,21 +243,9 @@ def iter_local_c4_files(folder_path):
 # ===================================================================
 
 def main():
-    noun_heads_counter = Counter()
     aapi_counter_pass = Counter()
-    verb_ethnicity_dict = defaultdict(Counter)
-    adj_ethnicity_dict = defaultdict(Counter)
-
-    print("Starting AAPI extraction pipeline...")
-
-    run_loop(
-        noun_heads_counter,
-        aapi_counter_pass,
-        verb_ethnicity_dict,
-        adj_ethnicity_dict,
-        out_dirname=OUTPUT_TOKENIZED_DIR,
-    )
-
+    init_db()
+    run_loop(aapi_counter_pass)
     print("Pipeline completed.")
 
 
