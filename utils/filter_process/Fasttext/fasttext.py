@@ -10,7 +10,7 @@ Used for:
 # Imports
 
 import fasttext
-from typing import List, Optional
+from typing import List, Optional, Tuple, Union
 from pathlib import Path
 
 
@@ -59,3 +59,22 @@ def window_mask_sentence(ethnicity_term, sent_tokens, tokens_lower, window=5):
     end = min(len(tokens_masked), idx + window + 1)
     # final join
     return " ".join(tokens_masked[start:end])
+
+
+def fasttext_predict(model, text: Union[str, List[str]], k: int = 1):
+    """
+    Unified API that supports both single-string prediction
+    and batched prediction over a list of strings.
+    
+    Returns:
+        - If input is str → returns label string
+        - If input is list[str] → returns list of label strings
+    """
+    if isinstance(text, str):
+        labels, _ = model.predict(text, k=k)
+        return labels[0]  # "__label__1" or "__label__0"
+
+    # Batched
+    labels_list, _ = model.predict(text, k=k)
+    # Return ["__label__1", "__label__0", ...]
+    return [labels[0] for labels in labels_list]

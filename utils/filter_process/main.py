@@ -19,6 +19,8 @@ import threading
 
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 
+import threading
+thread_local = threading.local()
 
 
 
@@ -38,6 +40,7 @@ from utils.filter_process.pos_db import (
 from utils.filter_process.Fasttext.fasttext import (
     window_mask_sentence,
     load_fasttext_model,
+    fasttext_predict,
 )
 
 from utils.filter_process.load_or_save import (
@@ -74,26 +77,53 @@ MODEL =  load_fasttext_model()
 AAPI_KEYWORDS = load_aapi_pkl()
 
 MAX_OUTSTANDING = 2000
-
+BATCH_SIZE = 500
 
 
 
 import json
 
 
+from utils.filter_process.dolma_local import AAPITokenizer
+
+def get_tokenizer():
+    if not hasattr(thread_local, "tokenizer"):
+        thread_local.tokenizer = AAPITokenizer(AAPI_KEYWORDS)
+    return thread_local.tokenizer
+
+
+
+
 
 def db_writer(queue: Queue, stop_signal: object):
     con = duckdb.connect(str(DB_PATH))
 
+    batch = []
+
     while True:
         item = queue.get()
+
         if item is stop_signal:
             break
 
-        noun_hits, verb_hits, adj_hits = item
-        save_pos_to_db(noun_hits, verb_hits, adj_hits, con)
+        batch.append(item)
+
+        if len(batch) >= BATCH_SIZE:
+
+            for noun_hits, verb_hits, adj_hits in batch:
+                save_pos_to_db(noun_hits, verb_hits, adj_hits, con)
+            batch = []
+
+    # flush remaining items
+    if batch:
+        con.execute("BEGIN;")
+        for noun_hits, verb_hits, adj_hits in batch:
+            save_pos_to_db(noun_hits, verb_hits, adj_hits, con)
+        con.execute("COMMIT;")
 
     con.close()
+
+
 
 
 def save_pos_to_db(noun_hits, verb_hits, adj_hits, con):
@@ -124,92 +154,124 @@ def save_pos_to_db(noun_hits, verb_hits, adj_hits, con):
         """, [eth, adjs_json, verbs_json, nouns_json])
 
 
+def process_batch(batch, tagger, q):
+    tokenizer = get_tokenizer()
 
-def process_single_doc(data, tagger, tokenizer):
-    noun_hits = defaultdict(set)
-    verb_hits = defaultdict(set)
-    adj_hits  = defaultdict(set)
+    mixed_list = []
+    for data in batch:
+        mixed = predict_n_mix(data, tagger)
+        if mixed:
+            mixed_list.append(mixed)
 
-    mixed = predict_n_mix(data, tagger)
-    if mixed is None:
-        return None
+    if not mixed_list:
+        return
 
-    tokenized = tokenizer.tokenize(mixed)
+    docs = tokenizer.pipe_batch(mixed_list)
 
-    for sentence in tokenized.sents:
-        tokens = [t.text for t in sentence]
-        tokens_lower = [t.lower() for t in tokens]
+    for doc, mixed in zip(docs, mixed_list):
+        noun_hits = defaultdict(set)
+        verb_hits = defaultdict(set)
+        adj_hits = defaultdict(set)
 
-        overlap = set(tokens_lower) & AAPI_KEYWORDS
-        if not overlap:
-            continue
+        # -----------------------------
+        # A. Collect sentences + window texts
+        # -----------------------------
+        window_texts = []
+        sent_overlap_pairs = []
 
-        eth = list(overlap)[0]
+        for sent in doc.sents:
+            tokens = [t.text for t in sent]
+            tokens_lower = [t.lower_ for t in sent]
 
-        window_text = (
-            window_mask_sentence(eth, tokens, tokens_lower)
-            .replace("\n", " ")
-            .strip()
-        )
+            overlap = set(tokens_lower) & AAPI_KEYWORDS
+            if not overlap:
+                continue
 
-        if MODEL.predict(window_text)[0][0] == "__label__0":
-            continue
+            eth = list(overlap)[0]
 
-        lex = build_group_lexicon(overlap)
-        mods = collect_all_modifiers(sentence, lex)
+            wt = window_mask_sentence(eth, tokens, tokens_lower)
 
-        for e, m in mods.items():
-            noun_hits[e].update(m["nouns"])
-            verb_hits[e].update(m["verbs"])
-            adj_hits[e].update(m["adjs"])
+            window_texts.append(wt)
+            sent_overlap_pairs.append((sent, overlap))
 
-    return noun_hits, verb_hits, adj_hits
+        # -----------------------------
+        # B. Batched FastText predict
+        # -----------------------------
+        if window_texts:
+            preds = fasttext_predict(MODEL, window_texts, k=1)
+        else:
+            preds = []
+
+        # -----------------------------
+        # C. Process predictions
+        # -----------------------------
+        for (sent, overlap), pred in zip(sent_overlap_pairs, preds):
+            if pred == "__label__0":
+                continue
+
+            lex = build_group_lexicon(overlap)
+            mods = collect_all_modifiers(sent, lex)
+
+            for e, m in mods.items():
+                noun_hits[e].update(m["nouns"])
+                verb_hits[e].update(m["verbs"])
+                adj_hits[e].update(m["adjs"])
+
+        # Send results to DB writer
+        q.put((noun_hits, verb_hits, adj_hits))
 
 
+
+BATCH_SIZE_NLP = 50   # good default
 
 def run_loop(aapi_counter_pass):
-
-    # Load shared objects ONCE — safe for threads
     tagger = AAPIKeywordsTagger(AAPI_KEYWORDS)
-    tokenizer = AAPITokenizer(AAPI_KEYWORDS)
-
-    ds = iter_local_c4_files(LOCAL_C4_FOLDER)
-
-    # --- queue for results ---
     q = Queue()
     STOP = object()
 
-    # --- start DB writer thread ---
     writer_thread = threading.Thread(target=db_writer, args=(q, STOP))
     writer_thread.start()
 
-    # --- Thread pool for CPU-bound workers ---
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = []
+    ds = iter_local_c4_files(LOCAL_C4_FOLDER)
+    batch = []
+    futures = []
 
+    pbar = tqdm(desc="Processing C4 batches", unit="batch", dynamic_ncols=True)
+
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
         for data in ds:
-            futures.append(
-                pool.submit(
-                    process_single_doc,
-                    data,
-                    tagger,
-                    tokenizer,
+            batch.append(data)
+
+            if len(batch) >= BATCH_SIZE_NLP:
+                futures.append(
+                    pool.submit(process_batch, list(batch), tagger, q)
                 )
+                batch.clear()
+            pbar.update(1)
+
+        # Process final partial batch
+        if batch:
+            futures.append(
+                pool.submit(process_batch, list(batch), tagger, q)
             )
-        if len(futures) >= MAX_OUTSTANDING:
-            done, futures = wait(futures, return_when=FIRST_COMPLETED)
-            for f in done:
-                result = f.result()
-                if result:
-                    q.put(result)
+            pbar.update(1)
 
-        for f in tqdm(as_completed(futures), total=len(futures), desc="Collecting results"):
-            result = f.result()
-            if result is None:
-                continue
-            q.put(result)
+        for f in as_completed(futures):
+            f.result()  
+            qs = q.qsize()
+           
 
-    # Tell writer to stop
+            if qs > 2000:
+                print(f"Queue size: {qs}")
+                print("Queue growing, DB writer might be falling behind!")
+
+            if qs > 10000:
+                print(f"Queue size: {qs}")
+                print("Queue extremely large — pipeline will start freezing!")
+                    
+        
+    pbar.close()
     q.put(STOP)
     writer_thread.join()
 
@@ -231,7 +293,9 @@ def iter_local_c4_files(folder_path):
     for gz_file in files:
         print(f"Reading: {gz_file.name}")
         with gzip.open(gz_file, "rt", encoding="utf-8") as f:
+            
             for line in f:
+                
                 try:
                     yield json.loads(line)
                 except Exception:

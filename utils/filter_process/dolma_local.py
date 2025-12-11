@@ -19,6 +19,9 @@ import dolma
 import gzip
 from pathlib import Path
 from typing import Dict, Any, Optional
+import threading
+thread_local = threading.local()
+
 
 import spacy
 
@@ -90,17 +93,7 @@ class AAPITokenizer:
     def __init__(self, aapi_terms: set | list) -> None:
         super().__init__()
 
-        # ---------------------------------------------------
-        # 1. Normalize ethnicity list:
-        #    - lowercase
-        #    - strip whitespace
-        #    - convert hyphens → spaces
-        # ---------------------------------------------------
-        # Example:
-        #   "Asian-American" → "asian american"
-        #   "central-asian" → "central asian"
-        #   "Central Asian" → "central asian"
-        # ---------------------------------------------------
+        # Normalize ethnicity list:
         base_terms = {
             str(t).strip().lower().replace("-", " ")
             for t in aapi_terms
@@ -109,10 +102,7 @@ class AAPITokenizer:
         self.base_terms = base_terms  # debugging visibility
         self.aapi_groups_set = set(base_terms)
 
-        # ---------------------------------------------------
-        # 2. Build multiword map:
-        #    "central asian" → "central_asian"
-        # ---------------------------------------------------
+        #if the word is multi, make sure stick together
         self.multiword_map: dict[str, str] = {
             term: term.replace(" ", "_")
             for term in base_terms
@@ -120,9 +110,7 @@ class AAPITokenizer:
         }
 
         # ---------------------------------------------------
-        # 3. Add merged versions to ethnicities set
-        #    so downstream logic knows these are single tokens.
-        # ---------------------------------------------------
+        # add merged versions to ethnicities set
         self.aapi_groups_set.update(self.multiword_map.values())
 
         # ---------------------------------------------------
@@ -153,8 +141,9 @@ class AAPITokenizer:
         # ---------------------------------------------------
         # 5. Load spaCy normally
         # ---------------------------------------------------
-        import spacy
+        
         self.nlp = spacy.load("en_core_web_sm")
+        
 
         # Add special-case tokens ONLY for single-word ethnicities
         # (multiword are handled by pretokenizer)
@@ -200,6 +189,15 @@ class AAPITokenizer:
         """
         text = self.preprocess(data["text"])
         return self.nlp(text)
+    
+    def pipe_batch(self, data_list):
+        """
+        Accepts a list of dicts like {"id": ..., "text": ...}
+        Returns a list of spaCy Docs in same order.
+        """
+        texts = [self.preprocess(d["text"]) for d in data_list]
+        docs = list(self.nlp.pipe(texts, batch_size=50))
+        return docs
 
 
 

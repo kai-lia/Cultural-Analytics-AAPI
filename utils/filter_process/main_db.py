@@ -3,14 +3,16 @@ import re
 import sys
 import json
 import gzip
-import fasttext
-import spacy
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from collections import defaultdict, Counter
 
 from tqdm import tqdm
 from datasets import load_dataset
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from queue import Queue
+import threading
 
 
 
@@ -30,6 +32,7 @@ from utils.filter_process.pos_db import (
 from utils.filter_process.Fasttext.fasttext import (
     window_mask_sentence,
     load_fasttext_model,
+    fasttext_predict
 )
 
 from utils.filter_process.load_or_save import (
@@ -98,93 +101,132 @@ def save_pos_to_db(noun_hits, verb_hits, adj_hits, con):
 
 
 
-def run_loop(aapi_counter_pass, con):
-    traversed = 0
+def db_writer(queue: Queue, stop_signal: object):
+    con = duckdb.connect(str(DB_PATH))
 
-    # Setup
+    batch = []
+    BATCH_SIZE_DB = 2000   # <- tune as needed
+
+    while True:
+        item = queue.get()
+        if item is stop_signal:
+            break
+
+        batch.append(item)
+
+        if len(batch) >= BATCH_SIZE_DB:
+            con.execute("BEGIN;")
+            for noun_hits, verb_hits, adj_hits in batch:
+                save_pos_to_db(noun_hits, verb_hits, adj_hits, con)
+            con.execute("COMMIT;")
+            batch = []
+
+    # flush remaining writes
+    if batch:
+        con.execute("BEGIN;")
+        for noun_hits, verb_hits, adj_hits in batch:
+            save_pos_to_db(noun_hits, verb_hits, adj_hits, con)
+        con.execute("COMMIT;")
+
+    con.close()
+
+
+def process_doc(mixed, tokenizer, aapi_keywords, model):
+    noun_hits = defaultdict(set)
+    verb_hits = defaultdict(set)
+    adj_hits  = defaultdict(set)
+
+    doc = tokenizer.tokenize(mixed)
+
+    window_texts = []
+    sent_overlap_pairs = []
+
+    # Collect sentences needing FT filtering
+    for sentence in doc.sents:
+        tokens = [t.text for t in sentence]
+        tokens_lower = [t.lower() for t in tokens]
+
+        overlap = set(tokens_lower) & aapi_keywords
+        if not overlap:
+            continue
+
+        eth = list(overlap)[0]
+        wt = window_mask_sentence(eth, tokens, tokens_lower)
+
+        window_texts.append(wt)
+        sent_overlap_pairs.append((sentence, overlap))
+
+    # Batched FastText
+    if window_texts:
+        preds = fasttext_predict(model, window_texts, k=1)
+    else:
+        preds = []
+
+    # Collect modifiers
+    for (sentence, overlap), pred in zip(sent_overlap_pairs, preds):
+        if pred == "__label__0":
+            continue
+
+        lex = build_group_lexicon(overlap)
+        mods = collect_all_modifiers(sentence, lex)
+
+        for e, m in mods.items():
+            noun_hits[e].update(m["nouns"])
+            verb_hits[e].update(m["verbs"])
+            adj_hits[e].update(m["adjs"])
+
+    return noun_hits, verb_hits, adj_hits
+
+
+def run_loop(aapi_counter_pass):
     init_db()
+
     aapi_keywords = load_aapi_pkl()
     tagger = AAPIKeywordsTagger(aapi_keywords)
     tokenizer = AAPITokenizer(aapi_keywords)
-    ds = iter_local_c4_files(LOCAL_C4_FOLDER)
     model = load_fasttext_model()
 
-    pbar = tqdm(
-        total=None,
-        desc="Processing C4 docs",
-        mininterval=0.5,
-        dynamic_ncols=True,
-        leave=True,
-    )
+    ds = iter_local_c4_files(LOCAL_C4_FOLDER)
 
-    for data in ds:
-        pbar.update(1)
-        mixed = predict_n_mix(data, tagger)
+    # Queue + DB writer
+    q = Queue()
+    STOP = object()
+    writer_thread = threading.Thread(target=db_writer, args=(q, STOP))
+    writer_thread.start()
 
-        if mixed is None:
-            continue
+    # ThreadPool for processing docs
+    MAX_WORKERS = 8
+    futures = []
+    processed = 0
 
-        tokenized = tokenizer.tokenize(mixed)
-
-        # ---------------------------------------------
-        # DOC-LEVEL UNIQUE SETS
-        # ---------------------------------------------
-        doc_mod_hits = defaultdict(lambda: {
-            "nouns": set(),
-            "verbs": set(),
-            "adjs": set()
-        })
-
-        # ---------------------------------------------
-        # SENTENCE LOOP
-        # ---------------------------------------------
-        for sentence in tokenized.sents:
-            
-            tokens = [t.text for t in sentence]
-            tokens_lower = [t.lower() for t in tokens]
-
-            # Ethnicity keyword present?
-            overlap = set(tokens_lower) & aapi_keywords
-            if not overlap:
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        for data in tqdm(ds, desc="Processing C4"):
+            mixed = predict_n_mix(data, tagger)
+            if mixed is None:
                 continue
 
-            overlap_eth = list(overlap)[0]
-            # Fasttext filtering
-            aapi_counter_pass[overlap_eth] += 1
+            # submit async job
+            futures.append(pool.submit(
+                process_doc,
+                mixed,
+                tokenizer,
+                aapi_keywords,
+                model
+            ))
 
-            window_text = (
-                window_mask_sentence(overlap_eth, tokens, tokens_lower)
-                .replace("\n", " ")
-                .strip()
-            )
+        # collect results
+        for f in tqdm(as_completed(futures), total=len(futures), desc="Collecting"):
+            result = f.result()
+            if result:
+                q.put(result)
 
-            if model.predict(window_text)[0][0] == "__label__0":
-                continue
+            processed += 1
 
-            aapi_counter_pass[overlap_eth] += 1
+    # stop DB writer
+    q.put(STOP)
+    writer_thread.join()
 
-            aapi_counter_pass.update(overlap)
-
-            # Unified POS collection
-            lex = build_group_lexicon(overlap)
-
-           
-
-            mods = collect_all_modifiers(sentence, lex)
-    
-            # Merge into doc-level accumulator
-            save_pos_to_db(
-            {eth: d["nouns"] for eth, d in mods.items()},
-            {eth: d["verbs"] for eth, d in mods.items()},
-            {eth: d["adjs"]  for eth, d in mods.items()},
-            con)
-    
-
-        traversed += 1
-
-    pbar.close()
-    save_progress(traversed)
-
+    save_progress(processed)
 
 
 def iter_local_c4_files(folder_path):
@@ -211,19 +253,15 @@ def iter_local_c4_files(folder_path):
                     continue
 
 
-# ===================================================================
-# MAIN
-# ===================================================================
-
 def main():
     aapi_counter_pass = Counter()
     print("Starting AAPI extraction pipeline...")
 
-    con = duckdb.connect(str(DB_PATH))   # <-- OPEN connection once
+    con = duckdb.connect(str(DB_PATH))   
 
-    run_loop(aapi_counter_pass, con)     # <-- PASS connection
+    run_loop(aapi_counter_pass, con)    
 
-    con.close()                          # <-- CLOSE at the end
+    con.close()                        
     print("Pipeline completed.")
 
 
