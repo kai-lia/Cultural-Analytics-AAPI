@@ -1,6 +1,6 @@
-# Cultural-Analytics-AAPI
+# AAPI
 
-Fall 2025 Cultural Analytics Project
+Fall 2025 Project on aapi in internet corpus
 
 ## How to run
 
