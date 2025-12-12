@@ -1,4 +1,11 @@
 import os
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+
+
+
+import os
 import re
 import sys
 import ujson as json
@@ -76,7 +83,19 @@ LOCAL_C4_FOLDER = Path("/Users/kaionamartinson/Desktop/Cultural-Analytics/dolma/
 DB_PATH = Path("data/output/full_pipeline/ethnicity_pos.duckdb")
 
 MODEL =  load_fasttext_model()
-AAPI_KEYWORDS = load_aapi_pkl()
+
+
+AAPI_WORDS = load_aapi_pkl()
+
+def normalize_keyword(k: str) -> str:
+    return k.lower().replace("-", "_").replace(" ", "_")
+
+AAPI_KEYWORDS = {normalize_keyword(k) for k in AAPI_WORDS}
+
+
+
+
+
 
 MAX_OUTSTANDING = 2000
 BATCH_SIZE = 500
@@ -88,6 +107,21 @@ import json
 
 from utils.filter_process.dolma_local import AAPITokenizer
 
+
+
+
+import psutil
+import os
+
+PROCESS = psutil.Process(os.getpid())
+
+def print_mem(tag):
+    mem = PROCESS.memory_info().rss / (1024 * 1024)
+    print(f"[MEM {tag}] {mem:.2f} MB")
+
+
+
+
 def get_tokenizer():
     if not hasattr(thread_local, "tokenizer"):
         thread_local.tokenizer = AAPITokenizer(AAPI_KEYWORDS)
@@ -95,9 +129,42 @@ def get_tokenizer():
 
 
 
-import re
-
 MAX_TOKENS_BEFORE_SKIP = 120   # you can tune this
+
+
+def iter_local_c4_files(folder_path):
+    folder_path = Path(folder_path)
+
+    files = sorted([
+        *folder_path.glob("*.json.gz"),
+        *folder_path.glob("*.jsonl.gz"),
+    ])
+
+    print(f"Found {len(files)} C4 files in {folder_path}")
+
+    if not files:
+        print("⚠ No matching C4 files found!")
+        return
+
+    for gz_file in files:
+        print(f"Reading: {gz_file.name}")
+        with gzip.open(gz_file, "rt", encoding="utf-8") as f:
+            
+            for line in f:
+                #t0 = time.time()
+                
+                try:
+                    yield json.loads(line)
+                except Exception:
+                    continue
+                #t1 = time.time()
+                #if t1 - t0 > 0.01:   # any slow parse
+                #    print(f"SLOW JSON LOAD: {t1 - t0:.4f}s line length={len(line)}")
+
+
+
+
+
 
 def simple_pre_split(text):
     """
@@ -158,8 +225,8 @@ def db_writer(queue: Queue, stop_signal: object):
 def save_pos_to_db(noun_hits, verb_hits, adj_hits, con):
     # For each ethnicity in this document:
     ethnicities = set(noun_hits.keys()) | set(verb_hits.keys()) | set(adj_hits.keys())
-
     for eth in ethnicities:
+        print("Hit:",eth)
         nouns = sorted(list(noun_hits.get(eth, set())))
         verbs = sorted(list(verb_hits.get(eth, set())))
         adjs  = sorted(list(adj_hits.get(eth, set())))
@@ -182,10 +249,12 @@ def save_pos_to_db(noun_hits, verb_hits, adj_hits, con):
                 has_dup = (ethnicity_sentence_modifiers.count + 1) > 1;
         """, [eth, adjs_json, verbs_json, nouns_json])
 
-
 def process_batch(batch, tagger, q):
     tokenizer = get_tokenizer()
 
+    # ---------------------------------------------------------
+    # 1. Predict AAPI keyword presence per document
+    # ---------------------------------------------------------
     mixed_list = []
     for data in batch:
         mixed = predict_n_mix(data, tagger)
@@ -194,35 +263,89 @@ def process_batch(batch, tagger, q):
 
     if not mixed_list:
         return
-    
 
-    
-    #start = time.time()
+    # ---------------------------------------------------------
+    # 2. Build safe_texts, BUT preserve *all sentences* that contain keywords
+    # ---------------------------------------------------------
+    MAX_EXTRA_SENTS_PER_DOC = 20      # safe filler sentences per doc
+    MAX_TOTAL_SENTS = 250             # global safety cap
+
     safe_texts = []
     safe_mixed = []
 
     for item in mixed_list:
-        # item["text"] is your document
-        for s in simple_pre_split(item["text"]):
+        doc_text = item["text"]
+        keyword = item["keyword"] if "keyword" in item else None  # optional metadata
+
+        keyword_sents = []
+        filler_sents = []
+
+        # Split document
+        for s in simple_pre_split(doc_text):
+            lower = s.lower()
+
+            if not keyword:
+                # No tag for this doc, so treat all sents as filler
+                filler_sents.append(s)
+            else:
+                # Only filter if keyword is known OR if overlap is detected
+                lower = s.lower()
+                norm = lower.replace("-", " ").replace("_", " ")
+
+                if any(
+                    k.replace("_", " ") in norm
+                    for k in AAPI_KEYWORDS
+                ):
+                    keyword_sents.append(s)
+
+
+        # Always keep **all keyword sentences**
+        for s in keyword_sents:
             safe_texts.append(s)
             safe_mixed.append(item)
+
+        # Keep a small number of non-keyword filler sentences to anchor spaCy context
+        for s in filler_sents[:MAX_EXTRA_SENTS_PER_DOC]:
+            safe_texts.append(s)
+            safe_mixed.append(item)
+
+    # Global safety cap to stop pathological documents
+    if len(safe_texts) > MAX_TOTAL_SENTS:
+        keyword_only = []
+        filler_only = []
+
+        for s, m in zip(safe_texts, safe_mixed):
+            norm = s.lower().replace("-", " ").replace("_", " ")
+            if any(k.replace("_", " ") in norm for k in AAPI_KEYWORDS):
+                keyword_only.append((s, m))
+            else:
+                filler_only.append((s, m))
+
+        kept = keyword_only + filler_only[:MAX_TOTAL_SENTS - len(keyword_only)]
+        safe_texts = [s for s, _ in kept]
+        safe_mixed = [m for _, m in kept]
 
     if not safe_texts:
         return
 
-    docs = tokenizer.nlp.pipe(safe_texts, batch_size=BATCH_SIZE_NLP)
+    # ---------------------------------------------------------
+    # 3. spaCy (safe, full consumption, controlled size)
+    # ---------------------------------------------------------
+    safe_texts_proc = [tokenizer.preprocess(t) for t in safe_texts]
+    docs = list(tokenizer.nlp.pipe(safe_texts_proc, n_process=1, batch_size=BATCH_SIZE_NLP))
+    
+    
+    
+    # ---------------------------------------------------------
+    # 4. Extract modifiers
+    # ---------------------------------------------------------
+    for i, doc in enumerate(docs):
+        mixed = safe_mixed[i]
 
-
-    #print("spaCy batch time:", time.time() - start)
-
-    for doc, mixed in zip(docs, mixed_list):
         noun_hits = defaultdict(set)
         verb_hits = defaultdict(set)
         adj_hits = defaultdict(set)
 
-        # -----------------------------
-        # A. Collect sentences + window texts
-        # -----------------------------
         window_texts = []
         sent_overlap_pairs = []
 
@@ -231,32 +354,30 @@ def process_batch(batch, tagger, q):
             tokens_lower = [t.lower_ for t in sent]
 
             overlap = set(tokens_lower) & AAPI_KEYWORDS
+
             if not overlap:
                 continue
 
-            eth = list(overlap)[0]
+            
+            multi = [e for e in overlap if "_" in e]
+            eth = multi[0] if multi else next(iter(overlap))
+
 
             wt = window_mask_sentence(eth, tokens, tokens_lower)
 
             window_texts.append(wt)
             sent_overlap_pairs.append((sent, overlap))
 
-        # -----------------------------
-        # B. Batched FastText predict
-        # -----------------------------
         if window_texts:
             preds = fasttext_predict(MODEL, window_texts, k=1)
         else:
             preds = []
 
-        # -----------------------------
-        # C. Process predictions
-        # -----------------------------
         for (sent, overlap), pred in zip(sent_overlap_pairs, preds):
             if pred == "__label__0":
                 continue
 
-            lex = build_group_lexicon(overlap)
+            lex = build_group_lexicon({eth})
             mods = collect_all_modifiers(sent, lex)
 
             for e, m in mods.items():
@@ -264,13 +385,18 @@ def process_batch(batch, tagger, q):
                 verb_hits[e].update(m["verbs"])
                 adj_hits[e].update(m["adjs"])
 
-        # Send results to DB writer
         q.put((noun_hits, verb_hits, adj_hits))
 
+    # ---------------------------------------------------------
+    # 5. Clean up spaCy docs to release memory
+    # ---------------------------------------------------------
+    
+
+    import gc
+    gc.collect()
 
 
-BATCH_SIZE_NLP = 150   # good default
-
+BATCH_SIZE_NLP = 1000   # good default
 
 
 
@@ -286,76 +412,26 @@ def run_loop(aapi_counter_pass):
 
     ds = iter_local_c4_files(LOCAL_C4_FOLDER)
     batch = []
-    futures = []
 
     pbar = tqdm(desc="Processing C4 batches", unit="batch", dynamic_ncols=True)
 
+    for data in ds:
+        batch.append(data)
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        for data in ds:
-            batch.append(data)
+        if len(batch) >= BATCH_SIZE_NLP:
+            # 👇 spaCy runs here on the main thread ONLY
+            process_batch(list(batch), tagger, q)
+            batch.clear()
+            pbar.update(1)
 
-            if len(batch) >= BATCH_SIZE_NLP:
-                futures.append(
-                    pool.submit(process_batch, list(batch), tagger, q)
-                )
-                batch.clear()
-            pbar.update(5000)
+    # Process final partial batch
+    if batch:
+        process_batch(list(batch), tagger, q)
+        pbar.update(1)
 
-        # Process final partial batch
-        if batch:
-            futures.append(
-                pool.submit(process_batch, list(batch), tagger, q)
-            )
-            pbar.update(5000)
-
-        for f in as_completed(futures):
-            f.result()  
-            qs = q.qsize()
-           
-            if qs > 2000:
-                print(f"Queue size: {qs}")
-                print("Queue growing, DB writer might be falling behind!")
-
-            if qs > 10000:
-                print(f"Queue size: {qs}")
-                print("Queue extremely large — pipeline will start freezing!")
-                    
-        
     pbar.close()
     q.put(STOP)
     writer_thread.join()
-
-
-def iter_local_c4_files(folder_path):
-    folder_path = Path(folder_path)
-
-    files = sorted([
-        *folder_path.glob("*.json.gz"),
-        *folder_path.glob("*.jsonl.gz"),
-    ])
-
-    print(f"Found {len(files)} C4 files in {folder_path}")
-
-    if not files:
-        print("⚠ No matching C4 files found!")
-        return
-
-    for gz_file in files:
-        print(f"Reading: {gz_file.name}")
-        with gzip.open(gz_file, "rt", encoding="utf-8") as f:
-            
-            for line in f:
-                #t0 = time.time()
-                
-                try:
-                    yield json.loads(line)
-                except Exception:
-                    continue
-                #t1 = time.time()
-                #if t1 - t0 > 0.01:   # any slow parse
-                #    print(f"SLOW JSON LOAD: {t1 - t0:.4f}s line length={len(line)}")
-
 
 
 # ===================================================================
@@ -366,6 +442,7 @@ def main():
     aapi_counter_pass = Counter()
     init_db()
     run_loop(aapi_counter_pass)
+  
     print("Pipeline completed.")
 
 

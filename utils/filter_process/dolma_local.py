@@ -32,10 +32,6 @@ from collections import Counter, defaultdict
 
 
 
-
-
-
-
 def open_new_shard(out_dir: Path, shard_idx: int) -> gzip.GzipFile:
     """
     Create a new JSONL.GZ shard file to store mixed docs.
@@ -95,9 +91,12 @@ class AAPITokenizer:
 
         # Normalize ethnicity list:
         base_terms = {
-            str(t).strip().lower().replace("-", " ")
+            str(t).strip().lower()
+                .replace("_", " ")
+                .replace("-", " ")
             for t in aapi_terms
         }
+
 
         self.base_terms = base_terms  # debugging visibility
         self.aapi_groups_set = set(base_terms)
@@ -144,7 +143,14 @@ class AAPITokenizer:
         
         self.nlp = spacy.load("en_core_web_sm", disable=[ "ner"])
 
-        
+        infixes = list(self.nlp.Defaults.infixes)
+
+        # Remove underscore-related splitting
+        infixes = [x for x in infixes if "_" not in x]
+
+        self.nlp.tokenizer.infix_finditer = compile_infix_regex(infixes).finditer
+
+    
 
         # Add special-case tokens ONLY for single-word ethnicities
         # (multiword are handled by pretokenizer)
@@ -168,15 +174,26 @@ class AAPITokenizer:
             return text
 
         def replacer(match):
-            raw = match.group(0)         
+            raw = match.group(0)
             lower = raw.lower()
-            norm = lower.replace("-", " ")  
+
+            # normalize separators
+            norm = re.sub(r"[-_\s]+", " ", lower).strip()
+
+            # hard coding the only one that has a 3 potential separtion
+            if norm == "south east asian":
+                print("triooo")
+                print(f"[AAPI MERGE] '{raw}' → 'southeast_asian'")
+                return "southeast_asian"
+
             merged = self.multiword_map.get(norm)
             if merged:
                 return merged
-            # fallback (should rarely happen)
+
+            # safe fallback
             return norm.replace(" ", "_")
 
+        # IMPORTANT: always return a string
         return self.multiword_regex.sub(replacer, text)
 
 
@@ -207,22 +224,28 @@ class AAPITokenizer:
 # AAPI Document Filter
 # ===========================
 def mix_aapi_doc(result: DocResult) -> Optional[Dict[str, Any]]:
-    """
-    Given a DocResult from AAPIKeywordsTagger:
-        If score > 0 → return dict for output JSONL profiling
-        Else → return None to discard
-    """
     doc = result.doc
     spans = result.spans or []
 
-    score = float(spans[0].score or 0.0) if spans else 0.0
-    if score <= 0.0:
+    # Keep document if it passed tagger at all
+    if not spans:
         return None
 
     return {
         "id": doc.id,
         "text": doc.text,
+        "aapi_score": spans[0].score,
     }
+
+
+
+def term_to_regex(term: str) -> str:
+        # asian_american → asian[-_\s]+american
+        parts = term.split("_")
+        if len(parts) == 1:
+            return rf"\b{re.escape(term)}\b"
+        return rf"\b{re.escape(parts[0])}(?:[-_\s]+){re.escape(parts[1])}\b"
+
 
 
 @add_tagger("aapi_keywords_v1")
@@ -239,16 +262,17 @@ class AAPIKeywordsTagger(BaseTagger):
         terms = [str(t).strip().lower() for t in list(raw_terms)]
         
         # Compile keyword regex
-        pattern = r"\b(" + "|".join(re.escape(t) for t in terms) + r")\b"
-        self.regex = re.compile(pattern, flags=re.IGNORECASE)
+        patterns = [term_to_regex(t) for t in terms]
+        self.regex = re.compile("|".join(patterns), flags=re.IGNORECASE)
+
+
+
 
     def predict(self, doc: Document) -> DocResult:
         text = doc.text or ""
         matches = self.regex.findall(text)
 
-        if not matches:
-            return DocResult(doc=doc, spans=[Span(0, 0, "aapi_keyword", 0.0)])
-
-        score = float(len({m.lower() for m in matches}))
+        # DO NOT hard-drop here
+        score = float(len({m.lower() for m in matches})) if matches else 0.0
         span = Span(0, len(text), "aapi_keyword", score)
         return DocResult(doc=doc, spans=[span])

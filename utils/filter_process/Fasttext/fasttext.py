@@ -70,6 +70,8 @@ def fasttext_predict(model, text: Union[str, List[str]], k: int = 1):
         - If input is str → returns label string
         - If input is list[str] → returns list of label strings
     """
+    text = [t.replace("\n", " ").strip() for t in text]
+
     if isinstance(text, str):
         labels, _ = model.predict(text, k=k)
         return labels[0]  # "__label__1" or "__label__0"
