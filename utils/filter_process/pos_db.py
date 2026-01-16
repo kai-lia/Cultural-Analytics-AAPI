@@ -7,25 +7,61 @@ from collections import defaultdict
 # ------------------------------------------------------------
 
 INTENSIFIERS = {
-    "super", "very", "really", "quite", "so", "too", "extremely",
-    "highly", "fairly", "slightly", "rather", "especially",
-    "incredibly, most", "more"
+    "super",
+    "very",
+    "really",
+    "quite",
+    "so",
+    "too",
+    "extremely",
+    "highly",
+    "fairly",
+    "slightly",
+    "rather",
+    "especially",
+    "incredibly, most",
+    "more",
 }
 
 CATEGORY_ADJ = {
-    "ethnic", "certain", "such", "various", "many", "several",
-    "some", "other", "only", "own", "different", "separate",
-    "this", "that", "these", "those", "most"
+    "ethnic",
+    "certain",
+    "such",
+    "various",
+    "many",
+    "several",
+    "some",
+    "other",
+    "only",
+    "own",
+    "different",
+    "separate",
+    "this",
+    "that",
+    "these",
+    "those",
+    "most",
 }
 
 NEVER_ADJ_POS = {
-    "DET", "AUX", "CCONJ", "SCONJ", "ADP", "PART", "INTJ",
-    "SYMBOL", "NUM", "PUNCT", "SPACE", "PRON"
+    "DET",
+    "AUX",
+    "CCONJ",
+    "SCONJ",
+    "ADP",
+    "PART",
+    "INTJ",
+    "SYMBOL",
+    "NUM",
+    "PUNCT",
+    "SPACE",
+    "PRON",
 }
 
 # ------------------------------------------------------------
 # GROUP LEXICON
 # ------------------------------------------------------------
+
 
 def build_group_lexicon(groups, vocab=None):
     lex = {}
@@ -33,29 +69,24 @@ def build_group_lexicon(groups, vocab=None):
         g = g.lower()
         lex[g] = g
         if not g.endswith("s"):
-            lex[g + "s"] = g     # Koreans → korean
+            lex[g + "s"] = g  # Koreans → korean
     return lex
 
 
-# ------------------------------------------------------------
-# ADJECTIVE CLEANER
-# ------------------------------------------------------------
-
 def clean_adj_string(lemma: str, tok=None) -> str:
     """Normalize and preserve correct form: "naïve" goes to "naive"""
-    lemma_clean = unicodedata.normalize("NFKD", lemma).encode(
-        "ascii", "ignore"
-    ).decode("ascii").lower().strip()
+    lemma_clean = (
+        unicodedata.normalize("NFKD", lemma)
+        .encode("ascii", "ignore")
+        .decode("ascii")
+        .lower()
+        .strip()
+    )
 
     lemma_clean = re.sub(r"[^a-z\-]", "", lemma_clean)
 
-
     return lemma_clean
 
-
-# ------------------------------------------------------------
-# TAXONOMY DETECTOR
-# ------------------------------------------------------------
 
 def is_taxonomy_listing(tok, group_lexicon):
     lemma = tok.lemma_.lower()
@@ -77,18 +108,19 @@ def is_taxonomy_listing(tok, group_lexicon):
 # HYPHENATED ADJECTIVE DETECTOR
 # ------------------------------------------------------------
 
+
 def is_hyphenated_adj(tok):
     doc = tok.doc
     i = tok.i
     if i + 2 >= len(doc):
         return None, None
 
-    t1, t2, t3 = doc[i], doc[i+1], doc[i+2]
+    t1, t2, t3 = doc[i], doc[i + 1], doc[i + 2]
 
     if t2.text != "-":
         return None, None
-    
-     # Left part must be an adjective-like token
+
+    # Left part must be an adjective-like token
     if t1.pos_ not in {"ADJ", "ADV"}:
         # Allow cases like "Filipino-American"
         if t1.pos_ == "PROPN":
@@ -106,12 +138,13 @@ def is_hyphenated_adj(tok):
 
     # Build a combined form like "hardworking"
     combined = (t1.text + t3.text).replace("-", "").lower()
-    return combined, [i, i+1, i+2]
+    return combined, [i, i + 1, i + 2]
 
 
 # ------------------------------------------------------------
 # FIXED PREDICATE-ADJECTIVE DETECTOR (THE KEY FIX)
 # ------------------------------------------------------------
+
 
 def is_predicate_adj(tok, eth_tok):
     """
@@ -124,7 +157,7 @@ def is_predicate_adj(tok, eth_tok):
     # Must be adjectival complement
     if tok.dep_ != "acomp":
         return False
-    
+
     # Copula verb
     cop = tok.head
     if cop.lemma_ != "be":
@@ -144,13 +177,14 @@ def is_predicate_adj(tok, eth_tok):
 # ADJECTIVE-LIKE DETECTOR
 # ------------------------------------------------------------
 
+
 def is_adjective_like(tok, eth_tok):
     text = tok.text.lower()
 
     if tok.pos_ == "ADJ":
         return True
-    
-     # CASE 2: Present participles used as adjectives (VBG)
+
+    # CASE 2: Present participles used as adjectives (VBG)
     if tok.pos_ == "VERB" and tok.tag_ == "VBG":
         # attributive: "welcoming Chinese"
         if tok.dep_ == "amod" and tok.head == eth_tok:
@@ -173,9 +207,10 @@ def is_adjective_like(tok, eth_tok):
     # Other POS cannot function as adjectives
     return False
 
+
 def verb_like(head, eth, out):
     for child in head.children:
-    
+
         if child.pos_ != "VERB":
             continue
 
@@ -206,13 +241,18 @@ def verb_like(head, eth, out):
 # MAIN FUNCTION — UNIFIED EXTRACTION
 # ------------------------------------------------------------
 
-def collect_all_modifiers(doc, group_lexicon):
-    out = defaultdict(lambda: {"nouns": set(), "verbs": set(), "adjs": set()}) # formating for final output
 
-    eth_tokens = [t for t in doc if t.lemma_.lower() in group_lexicon] # collecting ethnicities
-    if not eth_tokens: # if no ethnicity, break
+def collect_all_modifiers(doc, group_lexicon):
+    out = defaultdict(
+        lambda: {"nouns": set(), "verbs": set(), "adjs": set()}
+    )  # formating for final output
+
+    eth_tokens = [
+        t for t in doc if t.lemma_.lower() in group_lexicon
+    ]  # collecting ethnicities
+    if not eth_tokens:  # if no ethnicity, break
         return out
-    
+
     for eth_tok in eth_tokens:
         eth = group_lexicon[eth_tok.lemma_.lower()]
         head = eth_tok.head
@@ -272,16 +312,13 @@ def collect_all_modifiers(doc, group_lexicon):
         if head.pos_ in {"NOUN", "PROPN"} and eth_tok.dep_ in {"amod", "compound"}:
             verb_like(head, eth, out)
 
-        
-
         # ethnicity itself is subject: "Filipinos protested"
         if eth_tok.dep_ in {"nsubj", "nsubjpass"} and head.pos_ == "VERB":
             if eth_tok.head.dep_ != "ROOT":
                 continue
             # avoid predicate adjectives misparsed as verbs
             if head.text.lower().endswith("ing") and any(
-                c.pos_ == "AUX" and c.lemma_ == "be"
-                for c in head.children
+                c.pos_ == "AUX" and c.lemma_ == "be" for c in head.children
             ):
                 pass
             else:
@@ -304,22 +341,18 @@ def collect_all_modifiers(doc, group_lexicon):
         blocked = set()
 
         for tok in doc:
-            if tok.pos_ in NEVER_ADJ_POS: # speeeeding up proceses
+            if tok.pos_ in NEVER_ADJ_POS:  # speeeeding up proceses
                 continue
-            #checking if ethnic term
-            if tok == eth_tok: # removes tems like chinese malay
+            # checking if ethnic term
+            if tok == eth_tok:  # removes tems like chinese malay
                 continue
             lemma = tok.lemma_.lower()
             if lemma in group_lexicon:
                 continue
             if lemma in INTENSIFIERS or lemma in CATEGORY_ADJ:
                 continue
-            if tok.text.lower() in {"st", "nd", "rd", "th"}: # hard fix
+            if tok.text.lower() in {"st", "nd", "rd", "th"}:  # hard fix
                 continue
-
-
-
-
 
             if tok.head.pos_ == "NOUN":
                 # If head is the predicate noun (attr) connected to the same copula as ethnicity, allow it
@@ -330,11 +363,8 @@ def collect_all_modifiers(doc, group_lexicon):
                     if tok.head != eth_tok and tok.head != eth_tok.head:
                         continue
 
-            
-           
-
-            # hypenated dealings 
-            if tok.i in blocked: # this is for my hypened case
+            # hypenated dealings
+            if tok.i in blocked:  # this is for my hypened case
                 continue
 
             hyph, span = is_hyphenated_adj(tok)
@@ -391,8 +421,3 @@ def collect_all_modifiers(doc, group_lexicon):
                     continue
 
     return out
-
-
-
-
-
